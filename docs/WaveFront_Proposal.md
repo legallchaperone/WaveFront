@@ -6,9 +6,9 @@
 
 ## 1. 概述
 
-Diffusion 的调度一直是一维的：只有噪声水平 t。我们在自回归视频 diffusion 的每个 chunk 内部加上第二个轴——深度——让每个 token 的噪声水平成为 (t, 深度) 的函数。具体做法是把 chunk 内的 token 按 disparity 等距分成 K 层，用斜率 s 控制层与层之间的噪声错位：s=0 是标准 diffusion，s≥K 是严格的"先近后远"逐层自回归，二者之间是一个连续的滚动调度族。3D 一致性和分层深度表示由此成为调度的副产物，不需要渲染器、3D 教师特征或外部记忆。
+Diffusion 的调度一直是一维的：只有噪声水平 σ。我们在自回归视频 diffusion 的每个 chunk 内部加上第二个轴——深度——让每个 token 的噪声水平成为 (σ, 深度) 的函数。具体做法是把 chunk 内的 token 按 disparity 等距分成 K 层，用斜率 s 控制层与层之间的噪声错位：s=0 是标准 diffusion，s≥K 是严格的"先近后远"逐层自回归，二者之间是一个连续的滚动调度族。3D 一致性和分层深度表示由此成为调度的副产物，不需要渲染器、3D 教师特征或外部记忆。
 
-对模型的改动：噪声水平从逐帧改为逐 token；新增一个标量条件 d_plane；新增一个 disparity 输入/输出通道；当前 chunk 内的 attention 严格按 σ 排序。新增参数全部零初始化，初始化时 s=0 的前向与原模型数值一致。一次训练覆盖整个调度族，核心实验只换采样器。
+对模型的改动：噪声水平从逐帧改为逐 token；新增一个标量条件 d_plane（当前扫描到哪个深度）；新增一个 disparity 输入/输出通道；当前 chunk 内的 attention 严格按噪声水平排序（噪声低的不看噪声高的）。新增参数全部零初始化，初始化时 s=0 的前向与原模型数值一致。一次训练覆盖整个调度族；核心实验是一张"路径表"：同一组权重，只换采样器走不同的调度路径，比较一致性、动态与质量（7.2）。
 
 ## 2. 背景与动机
 
@@ -82,7 +82,9 @@ Diffusion Forcing 在时间轴上给每帧独立噪声；UniCon 用 timestep 解
 
 ### 4.1 基座与不动的部分
 
-基座是 minWM 的 Wan 2.1 1.3B chunk-causal AR 模型（Stage 1 teacher forcing 权重，PRoPE 相机条件）。时间轴原样保留：一个 chunk 是 4 个 latent 帧，chunk 间 causal，KV cache 和 chunk 结束时的 refresh 都不变——时间 causal 是 cache、蒸馏、流式的根基，真正缺的是 chunk 内的空间结构。位置编码不动（3D RoPE + PRoPE），顺序只由噪声水平和 attention mask 表达。
+基座是 minWM 的 Wan 2.1 1.3B chunk-causal AR 模型。minWM 把训练分成四个 Stage：Stage 0 双向 SFT，Stage 1 用 teacher forcing 训练 causal AR 模型，Stage 2 做 ODE 或一致性蒸馏，Stage 3 做 DMD。我们从 Stage 1 的权重（带 PRoPE 相机条件）续训。teacher forcing 训练时，把整段视频的干净版本和带噪版本拼成一条序列：每个带噪 chunk 只能看到它之前的干净 chunk 和它自己，相当于用真值历史当上下文。
+
+时间轴原样保留：一个 chunk 是 4 个 latent 帧，chunk 间 causal；每个 chunk 生成完后，再用干净结果前向一次，把它的 KV 写入 cache 供后续 chunk 使用（下称 refresh）。这些都不变——时间 causal 是 cache、蒸馏、流式的根基，真正缺的是 chunk 内的空间结构。位置编码不动（3D RoPE + PRoPE），顺序只由噪声水平和 attention mask 表达。
 
 Token 网格：480×832 的视频经 VAE（空间 8×、时间 4×）再 patch 2×2，每个 latent 帧是 30×52 = 1560 个 token，每个 token 覆盖 16×16 像素；一个 chunk 有 6240 个 token。
 
@@ -94,7 +96,7 @@ Token 网格：480×832 的视频经 VAE（空间 8×、时间 4×）再 patch 2
 
 $$\sigma_\ell=\operatorname{clip}\big(\sigma_0+s\,(d_{\text{plane}}-q_\ell),\;0,\;1\big)$$
 
-每个 token 的 σ_i 就是它所在层的 σ_ℓ。其中 **d_plane 是前沿层的层值，σ_0 是前沿层当前的噪声**；前沿层指按扫描方向最先、尚未提交、且非空的那一层。s=0 时约定 d_plane=1。σ 经调度器换算成 Wan 的 timestep 送进 AdaLN。
+每个 token 的 σ_i 就是它所在层的 σ_ℓ。噪声降到 0 的 token 称为**已提交**：此后它固定不变，作为其余 token 去噪的条件。式中 **d_plane 是前沿层的层值，σ_0 是前沿层当前的噪声**；前沿层指按扫描方向最先、尚未提交、且非空的那一层。s=0 时约定 d_plane=1。σ 经调度器换算成 Wan 的 timestep 送进 AdaLN。
 
 为什么用层值 q_ℓ 而不是连续的 d_i：若把连续 d_i 代入，s→∞ 时每个 token 只能是 0 或 1，没有任何 token 经历中间噪声，"每层去噪 T 步"无从谈起。量化之后，只要 s ≥ K，相邻层的噪声至少差 1：前沿层取 σ_0，更近的截成 0，更远的截成 1——这就是严格逐层。因此**"斜率 ∞"定义为 s=K**，更大的 s 只会在层之间插入空转步，二者等价。
 
@@ -120,7 +122,7 @@ $$\sigma_\ell=\operatorname{clip}\big(\sigma_0+s\,(d_{\text{plane}}-q_\ell),\;0,
   - a 决定深度比颜色早多少成形。加噪是 x_σ = (1−σ)·x + σ·ε，信号放大 a 倍等价于这个通道的噪声变轻：以 [−1,1] 为基准，token 处在 σ 时，深度通道相当于处在 σ_eff，满足 (1−σ_eff)/σ_eff = a·(1−σ)/σ。例如 a=2、σ=0.5 时 σ_eff≈0.33。深度越早稳定，按深度分层的提交越可靠，可用的斜率范围越宽。
   - 用缩放而不是给深度单独一个 timestep：二者等价，但缩放保持"每个 token 一个 σ"，mask、提交规则和 d_plane 都依赖这一点。
   - a 不设为可学习：噪声在缩放之后加，loss 量级又随 a 变化，学出来的 a 会朝 loss 小的方向退化，而不是朝生成好的方向。
-  - 默认 a=2，让深度略早于颜色成形。阶段 0 用短训扫 a ∈ {1, 2, 4}，以 7.3 第 3 条的曲线和 s=0 下的 RGB 质量为判据，定下后写进 config 固定。a 过大时，深度会在几乎没有颜色信息时被定死，且 disparity 的 loss 按 a² 放大。
+  - 默认 a=2，让深度略早于颜色成形。具体取值用短训扫 a ∈ {1, 2, 4} 确定，判据是 disparity 预测准确率随噪声水平的曲线（7.3）和 s=0 下的 RGB 质量，定下后写进 config 固定。a 过大时，深度会在几乎没有颜色信息时被定死，且 disparity 的 loss 按 a² 放大。
 - **loss 权重**：每个 token 有 64 个 RGB 数值、1 个 disparity，用显式权重 λ 平衡，初值使两者每 token 的 loss 量级相当。a 会改变这一项的量级，所以先定 a 再调 λ。
 
 ### 4.4 token 归属与提交
@@ -132,7 +134,7 @@ $$\sigma_\ell=\operatorname{clip}\big(\sigma_0+s\,(d_{\text{plane}}-q_\ell),\;0,
 3. **迟到 token 并入前沿层**：未提交 token 的噪声不低于前沿层。估计被改近的 token 跟着前沿层一起完成，而不是一步从高噪声直接提交（那相当于从噪声直接预测干净结果，质量差）。
 4. σ 到 0 的 token 提交，之后以 σ=0 和固定值参与计算；最后一步强制全部提交。
 
-训练用真值划层、推理用预测划层，这个 exposure bias 与 LLM 完全同构。阶段 1 后期把训练时的分层依据换成模型自己预测的 disparity（由一次无梯度前向得到），噪声仍按真值加，用来兜底。
+训练用真值划层、推理用预测划层，这个 exposure bias 与 LLM 完全同构。训练后期把分层依据换成模型自己预测的 disparity（由一次无梯度前向得到），噪声仍按真值加，用来兜底。
 
 ### 4.5 条件 d_plane
 
@@ -181,7 +183,7 @@ c3 F         #  #  #    #  #  #    #  #  #
    | s = 0 | 25% | 就是原模型的训练样本，保证不退化 |
    | 严格逐层 s = K | 25% | 路径表的严格端点 |
    | 中间斜率 0 < s < K | 35% | log-uniform |
-   | 打乱层序 | 10% | 层仍按深度划分，但先后顺序随机排列；服务于"打乱层序"对照 |
+   | 打乱层序 | 10% | 层仍按深度划分，但先后顺序随机排列；服务于"打乱层序"对照（7.2） |
    | 草稿-提交 | 5% | 已提交层为 0，其余所有 token 共用 σ_0；不在公式族内，只服务于路径表附加行 |
 
    s≠0 的各类型中，20% 取负号（远→近）。
@@ -208,7 +210,7 @@ flowchart LR
     end
     subgraph DIT["去噪 DiT：Wan 2.1 1.3B，30 层，可训练"]
         IN["patch_embedding + disp_embed（零初始化）"]
-        BLK["Self-Attn：当前 chunk 严格按 σ<br/>Cross-Attn：文本 · FFN<br/>AdaLN：逐 token t_i + d_plane（零初始化）"]
+        BLK["Self-Attn：当前 chunk 严格按 σ<br/>Cross-Attn：文本 · FFN<br/>AdaLN：逐 token σ_i + d_plane（零初始化）"]
         OUT["head → RGB 速度<br/>disp_head → disparity 速度（零初始化）"]
         IN --> BLK --> OUT
     end
@@ -248,11 +250,9 @@ flowchart TD
 
 **采样器**：逐 token Euler，每个 token 用自己的步长 σ_i\* − σ_i。原 teacher forcing 推理用的 UniPC 是多步法，依赖所有 token 共用一张时间表，这里不适用。因此路径表的 s=0 行用同一个逐 token Euler，另报原 UniPC 作参考。
 
-**阶段 0 的实现**：每步把整个 chunk（已提交 token 以 σ=0 带着）重算一遍，mask 由当前 σ 图决定。之后的加速：提交集合不变期间，已提交 token 的 KV 不变，可以在每次提交事件时只算一次。
-
 ### 5.3 计算量
 
-每个 chunk 的模型调用数 N(s, K) = T·(1 + s(K−1)/K)（0 ≤ s ≤ K）。以 T=50 为例：s=0 为 50 次；K=4、s=1 约 88 次；K=4 严格逐层为 200 次。等 NFE 比较（7.3）固定 N，再反推 T。
+每个 chunk 的模型调用数（NFE，number of function evaluations）记作 N(s, K) = T·(1 + s(K−1)/K)（0 ≤ s ≤ K）。以 T=50 为例：s=0 为 50 次；K=4、s=1 约 88 次；K=4 严格逐层为 200 次。等 NFE 比较（7.3）固定 N，再反推 T。
 
 ## 6. 数据
 
@@ -266,8 +266,8 @@ flowchart TD
 ### 6.2 预处理（全部离线）
 
 - **片段长度**：Wan VAE 把 F 个 latent 帧解码为 1+4(F−1) 个像素帧；chunk 固定为 4 个 latent 帧，所以 latent 帧数必须是 4 的倍数。
-  - 阶段 0 取 45 帧（12 个 latent 帧 = 3 个 chunk），后两个 chunk 有历史，能测到跨 chunk 的效果。
-  - 阶段 1 取 77 帧（20 个 latent 帧 = 5 个 chunk），与 Stage 1 checkpoint、`local_attn_size=20` 和推理配置一致。
+  - 快速验证用 45 帧（12 个 latent 帧 = 3 个 chunk），后两个 chunk 有历史，能测到跨 chunk 的效果。
+  - 完整训练用 77 帧（20 个 latent 帧 = 5 个 chunk），与 minWM Stage 1 的 checkpoint、20 帧的注意力窗口和推理配置一致。
   - 不改成 3 帧一个 chunk 去凑 81 帧：那会改变 checkpoint 已经学到的因果结构。
   - 一次训练内所有样本等长。分辨率 480×832；帧率对齐 minWM 现有 Wan 数据 **【待定·数据：SpatialVID 的原始帧率与采样方式】**。
 - **VAE latent、T5 文本嵌入**：离线算好，训练循环不含 VAE 与 T5。
@@ -280,7 +280,7 @@ flowchart TD
 - **相机位姿**：转成 minWM 的格式——w2c、OpenCV 坐标系、`[tx,ty,tz,qx,qy,qz,qw]`、内参按图像尺寸归一化，每个 latent 帧一个位姿。约定弄错不会报错，只会让相机控制悄悄学歪；转换后用 `tools/data/wan21/check_dataset_bev.py` 把轨迹和视频画在一起检查。
 - **存储**：沿用 minWM 的 LMDB 格式，新增 `disparity` 键。
 
-### 6.3 层统计（阶段 0 之前做）
+### 6.3 层统计（训练前做）
 
 在选出的 SpatialVID 子集上统计两件事：各 K 下每层的 token 占比；相邻 chunk 之间同一位置层号跳变的比例。若等距分层极不均衡（例如近层平均只占极小比例），就考虑改为按分位数分层，代价是失去 3.2 的几何含义。
 
@@ -327,13 +327,13 @@ flowchart TD
 
 1. **收益是不是多算出来的**：等 NFE 比较。固定每 chunk 总调用数，按 5.3 的公式反推 T，扫 (s, K) 的组合，画质量曲线。预期曲线非单调，最优点在中间。
 2. **3D 到底在哪**：沿用 Geometry Forcing 的探针协议（冻结 backbone，中间层特征上训 DPT 头预测几何，目标来自 VGGT），做两处修改以避免 confound。一是对照组是"同一权重、s=0 推理"；二是探我们没监督过的量：世界坐标系 pointmap、chunk 间相对相机位姿、给定相机运动下下一 chunk 的深度。另加两条独有的分析轴：按 DiT 层索引、按扫描位置画几何质量曲线。
-3. **这个平面哪里可走**：disparity 预测准确率随噪声水平的曲线。深度在去噪中稳定得越早，可用的斜率范围越宽。阶段 0 顺手测，也用来定 disparity 的缩放 a（4.3）。
+3. **这个平面哪里可走**：disparity 预测准确率随噪声水平的曲线。深度在去噪中稳定得越早，可用的斜率范围越宽。在快速验证的短训里顺手测，也用来定 disparity 的缩放 a（4.3）。
 
 ## 8. 实施计划
 
 ### 8.1 代码库
 
-**minWM**（shengshu-ai，2026.5）。四阶段齐全（双向 + 相机 SFT → causal teacher-forcing AR → causal CD → causal DMD），带相机位姿数据处理成 latent 的流程、LMDB latent 数据集、每阶段 checkpoint、序列并行和踩坑记录。基座选 Wan 2.1 1.3B 这条线（HY 1.5 为 8B，超出算力预算）。备选 Causal Forcing 官方仓库（支持 Rolling Forcing）。不选 Self-Forcing：训练无数据、无相机控制，重访类 benchmark 跑不了。
+**minWM**（shengshu-ai，2026.5）。四个 Stage 齐全（双向 + 相机 SFT → causal teacher-forcing AR → causal CD → causal DMD），带相机位姿数据处理成 latent 的流程、LMDB latent 数据集、每个 Stage 的 checkpoint、序列并行和踩坑记录。基座选 Wan 2.1 1.3B 这条线（HY 1.5 为 8B，超出算力预算）。备选 Causal Forcing 官方仓库（支持 Rolling Forcing）。不选 Self-Forcing：训练无数据、无相机控制，重访类 benchmark 跑不了。
 
 ### 8.2 代码改动
 
@@ -353,12 +353,16 @@ flowchart TD
 
 **Checkpoint 加载**：Stage 1 checkpoint 里没有新增的参数，严格加载会报缺键。写一个一次性脚本，给 checkpoint 补上全零的新参数（checkpoint 手术），保持严格加载——这样参数名拼错时仍会报错。
 
+**推理的第一版实现**：每步把整个 chunk（已提交 token 以 σ=0 带着）重算一遍，mask 由当前 σ 图决定；结果正确，但不省计算。加速放到后面：提交集合不变期间，已提交 token 的 KV 不变，只需在每次有 token 提交时重算一次。
+
 ### 8.3 阶段与算力
+
+下表的"阶段"是本项目的实施阶段，与 4.1 介绍的 minWM Stage 编号无关。
 
 | 阶段 | 内容 | 8×A100 80GB 估时 |
 |---|---|---|
 | 准备 | Wan mock config 跑通训练与推理；s=0 等价测试；6.3 层统计；6.4 各项定案 | 1–2 天 |
-| 0 假设验证 | 从 minWM Stage 1 AR + 相机 checkpoint 续训，480p、45 帧（3 个 chunk）、3–5K 步、batch 16；同时测 disparity-vs-噪声曲线，并扫 a ∈ {1, 2, 4}；跑简版路径表 | 2–3 天 |
+| 0 假设验证 | 快速验证：从 minWM Stage 1 AR + 相机 checkpoint 续训，480p、45 帧（3 个 chunk）、3–5K 步、batch 16；同时测 disparity-vs-噪声曲线，并扫 a ∈ {1, 2, 4}；跑简版路径表 | 2–3 天 |
 | 1 完整续训 | 77 帧（5 个 chunk），同配置延长；后期换成按模型预测的 disparity 分层（4.4） | 3–4 天 |
 | 2 路径表与分析 | 完整路径表、等 NFE、真/伪深度对照、probing | 约 1 周（推理为主） |
 | 3 评测 | 三层 benchmark | 2–3 天 |
