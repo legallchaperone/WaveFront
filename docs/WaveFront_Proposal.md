@@ -208,7 +208,7 @@ flowchart LR
         LAY["等 disparity 分 K 层，层值 q_ℓ"]
         SIG["σ_ℓ = clip(σ₀ + s·(d_plane − q_ℓ), 0, 1)"]
     end
-    subgraph DIT["去噪 DiT：Wan 2.1 1.3B，30 层，可训练"]
+    subgraph DIT["去噪 DiT：Wan 2.1 1.3B，30 个 DiT 层，可训练"]
         IN["patch_embedding + disp_embed（零初始化）"]
         BLK["Self-Attn：当前 chunk 严格按 σ<br/>Cross-Attn：文本 · FFN<br/>AdaLN：逐 token σ_i + d_plane（零初始化）"]
         OUT["head → RGB 速度<br/>disp_head → disparity 速度（零初始化）"]
@@ -272,9 +272,9 @@ N(s, K) = T·(1 + s(K−1)/K)，0 ≤ s ≤ K
 ### 6.2 预处理（全部离线）
 
 - **片段长度**：Wan VAE 把 F 个 latent 帧解码为 1+4(F−1) 个像素帧；chunk 固定为 4 个 latent 帧，所以 latent 帧数必须是 4 的倍数。
-  - 快速验证用 45 帧（12 个 latent 帧 = 3 个 chunk），后两个 chunk 有历史，能测到跨 chunk 的效果。
-  - 完整训练用 77 帧（20 个 latent 帧 = 5 个 chunk），与 minWM Stage 1 的 checkpoint、20 帧的注意力窗口和推理配置一致。
-  - 不改成 3 帧一个 chunk 去凑 81 帧：那会改变 checkpoint 已经学到的因果结构。
+  - 快速验证用 45 个像素帧（12 个 latent 帧 = 3 个 chunk），后两个 chunk 有历史，能测到跨 chunk 的效果。
+  - 完整训练用 77 个像素帧（20 个 latent 帧 = 5 个 chunk），与 minWM Stage 1 的 checkpoint、20 个 latent 帧的注意力窗口和推理配置一致。
+  - 不改成 3 个 latent 帧一个 chunk 去凑 81 个像素帧：那会改变 checkpoint 已经学到的因果结构。
   - 一次训练内所有样本等长。分辨率 480×832；帧率对齐 minWM 现有 Wan 数据 **【待定·数据：SpatialVID 的原始帧率与采样方式】**。
 - **VAE latent、T5 文本嵌入**：离线算好，训练循环不含 VAE 与 T5。
 - **每 token disparity**：
@@ -368,8 +368,8 @@ N(s, K) = T·(1 + s(K−1)/K)，0 ≤ s ≤ K
 | 阶段 | 内容 | 8×A100 80GB 估时 |
 |---|---|---|
 | 准备 | Wan mock config 跑通训练与推理；s=0 等价测试；6.3 层统计；6.4 各项定案 | 1–2 天 |
-| 0 假设验证 | 快速验证：从 minWM Stage 1 AR + 相机 checkpoint 续训，480p、45 帧（3 个 chunk）、3–5K 步、batch 16；同时测 disparity-vs-噪声曲线，并扫 a ∈ {1, 2, 4}；跑简版路径表 | 2–3 天 |
-| 1 完整续训 | 77 帧（5 个 chunk），同配置延长；后期换成按模型预测的 disparity 分层（4.4） | 3–4 天 |
+| 0 假设验证 | 快速验证：从 minWM Stage 1 AR + 相机 checkpoint 续训，480p、45 个像素帧（3 个 chunk）、3–5K 训练步、batch 16；同时测 disparity-vs-噪声曲线，并扫 a ∈ {1, 2, 4}；跑简版路径表 | 2–3 天 |
+| 1 完整续训 | 77 个像素帧（5 个 chunk），同配置延长；后期换成按模型预测的 disparity 分层（4.4） | 3–4 天 |
 | 2 路径表与分析 | 完整路径表、等 NFE、真/伪深度对照、probing | 约 1 周（推理为主） |
 | 3 评测 | 三层 benchmark | 2–3 天 |
 | 4 蒸馏（可选） | minWM Stage 2/3；DMD 只作用于 RGB 通道，深度通道由阶段 1 模型自蒸馏 | 1–2 天 |

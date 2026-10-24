@@ -1,3 +1,11 @@
+# WaveFront: World Models that Denoise the Near Before the Far
+
+This project is forked from minWM.
+
+The proposal is in docs/WaveFront_Proposal.md, don't change it unless asked to.
+
+Terminology follows docs/GLOSSARY.md, in docs, code names, comments and discussion. Register a new term there before using it.
+
 # minWM Engine — Code Style & Conventions
 
 Project-level coding standards for `minwm/`. These bind both human contributors
