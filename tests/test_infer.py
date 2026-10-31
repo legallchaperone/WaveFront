@@ -66,6 +66,19 @@ def test_read_benchmark_keeps_absolute_image(tmp_path):
     assert sample["image"] == abs_img
 
 
+def test_read_benchmark_passes_poses_and_seed_through(tmp_path):
+    poses = [[[1.0, 0, 0, 0], [0, 1.0, 0, 0], [0, 0, 1.0, 0], [0, 0, 0, 1.0]]] * 2
+    item = {"id": "ws_01", "caption": "a room", "poses": poses, "seed": 7}
+    (sample,) = read_benchmark(_write_json(tmp_path, [item]))
+    assert sample == {
+        "id": "ws_01",
+        "prompt": "a room",
+        "trajectory": None,
+        "poses": poses,
+        "seed": 7,
+    }
+
+
 def test_read_benchmark_limit_slices(tmp_path):
     path = _write_json(tmp_path, [{"id": i, "caption": f"c{i}"} for i in range(5)])
     assert len(read_benchmark(path, limit=2)) == 2
@@ -133,12 +146,42 @@ def test_run_strips_id_from_generation_batch(tmp_path, stub_mp4_encode):
     assert inf.seen_batches == [{"prompt": "a cat", "image": "x.png"}]
 
 
+def test_run_item_seed_overrides_position_and_stays_off_the_batch(tmp_path, stub_mp4_encode):
+    inf = _RunInferencer(str(tmp_path))
+    inf.run([{"id": "a", "prompt": "a cat"}, {"id": "b", "prompt": "a dog", "seed": 41}])
+    assert inf.seen_batches == [{"prompt": "a cat"}, {"prompt": "a dog"}]
+    with open(os.path.join(str(tmp_path), "manifest.json"), encoding="utf-8") as f:
+        items = json.load(f)["items"]
+    assert [it["seed"] for it in items] == [0, 41]
+
+
 def test_run_records_id_in_manifest(tmp_path, stub_mp4_encode):
     inf = _RunInferencer(str(tmp_path))
     inf.run([{"id": "clip_07", "prompt": "a cat"}, {"id": "clip_08", "prompt": "a dog"}])
     with open(os.path.join(str(tmp_path), "manifest.json"), encoding="utf-8") as f:
         items = json.load(f)["items"]
     assert [it["id"] for it in items] == ["clip_07", "clip_08"]
+
+
+def test_run_saves_lossless_frames_when_configured(tmp_path, stub_mp4_encode):
+    pytest.importorskip("torchvision")
+    inf = _RunInferencer(str(tmp_path))
+    inf.inference_cfg["save_frames"] = True
+    inf.run([{"id": "clip_07", "prompt": "a cat"}])
+    frames_dir = os.path.join(str(tmp_path), "clip_07.frames")
+    assert sorted(os.listdir(frames_dir)) == ["00000.png"]
+    assert not os.path.exists(f"{frames_dir}.tmp")
+
+
+def test_result_writer_frames_are_lossless(tmp_path, stub_mp4_encode):
+    torchvision_io = pytest.importorskip("torchvision.io")
+    video = torch.rand(1, 3, 3, 4, 6)
+    writer = ResultWriter(str(tmp_path), fps=16, save_frames=True)
+    writer.write("clip_10", {"latents": torch.zeros(1), "video": video})
+    frames_dir = os.path.join(str(tmp_path), "clip_10.frames")
+    assert sorted(os.listdir(frames_dir)) == ["00000.png", "00001.png", "00002.png"]
+    first = torchvision_io.read_image(os.path.join(frames_dir, "00000.png"))
+    assert torch.equal(first, (video[0, 0] * 255.0).clamp(0, 255).to(torch.uint8))
 
 
 def test_result_writer_latents_only_when_no_video(tmp_path):

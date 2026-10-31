@@ -179,6 +179,36 @@ class TestTrajectoryParser:
         with pytest.raises(ValueError):
             parse_trajectory("forward*5")
 
+    def test_explicit_poses_match_trajectory_string(self):
+        vm_str, ks_str = make_camera_tensors("w*10,d*9")
+        vm_poses, ks_poses = make_camera_tensors(parse_trajectory("w*10,d*9").tolist())
+        assert torch.allclose(vm_str, vm_poses)
+        assert torch.allclose(ks_str, ks_poses)
+
+    def test_badly_shaped_poses_raise(self):
+        with pytest.raises(ValueError, match="shaped"):
+            make_camera_tensors(np.zeros((20, 3, 4)))
+
+
+class TestCameraTrajectoryPoses:
+    _RUNTIME = InferenceRuntime(device=torch.device("cpu"), dtype=torch.float32, inference_cfg={})
+
+    def test_poses_become_viewmats_per_prompt(self):
+        poses = parse_trajectory("j*3").tolist()
+        batch = CameraTrajectory()({"prompts": ["a", "b"], "poses": poses}, self._RUNTIME)
+        assert batch["viewmats"].shape == (2, 4, 4, 4)
+        assert batch["Ks"].shape == (2, 4, 3, 3)
+        assert torch.allclose(batch["viewmats"][1], torch.tensor(poses))
+
+    def test_trajectory_and_poses_together_raise(self):
+        batch = {"prompts": ["a"], "trajectory": "w*1", "poses": parse_trajectory("w*1")}
+        with pytest.raises(ValueError, match="not both"):
+            CameraTrajectory()(batch, self._RUNTIME)
+
+    def test_no_camera_leaves_batch_untouched(self):
+        batch = CameraTrajectory()({"prompts": ["a"]}, self._RUNTIME)
+        assert "viewmats" not in batch
+
 
 class TestPrefixStripLoader:
     def test_model_prefix_strip_matches_keys(self):

@@ -190,6 +190,8 @@ class Inference:
     """Require the checkpoint keys to match the model exactly."""
     output_dir: str = "outputs/infer"
     """Directory for ``{id}.mp4`` + ``{id}.latents.pt`` + ``manifest.json``."""
+    save_frames: bool = False
+    """Also write each video losslessly as ``{id}.frames/00000.png ...`` (frame-based eval)."""
     guidance_scale: float = 1.0
     """CFG scale; ``<= 1`` disables the unconditional branch."""
     negative_prompt: str = ""

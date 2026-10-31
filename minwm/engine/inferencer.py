@@ -3,6 +3,7 @@
 import json
 import os
 import re
+import shutil
 
 import torch
 
@@ -58,17 +59,22 @@ def read_benchmark(path: str, limit: int | None = None) -> list[dict]:
     (encoded by ``HYConditioning``); omitting it makes the item t2v (Wan's
     default preprocessors ignore ``image``). Every item must carry an ``id`` —
     the output video is named ``{id}.mp4`` (see :meth:`BaseInferencer.run`).
+    The camera comes from either a ``trajectory`` string or explicit ``poses``
+    (one w2c 4x4 matrix per latent frame, see :class:`CameraTrajectory`). An
+    item's own ``seed`` pins its noise regardless of its position in the file.
 
     Args:
         path (str): benchmark JSON holding a list of ``{id, caption, trajectory}``
-            items, each optionally with ``image`` (present -> i2v, absent -> t2v).
-            Resolved CWD-independently via :func:`_resolve_benchmark_path`.
+            items, each optionally with ``image`` (present -> i2v, absent ->
+            t2v), ``poses`` (in place of ``trajectory``) and ``seed``. Resolved
+            CWD-independently via :func:`_resolve_benchmark_path`.
         limit (int | None): keep only the first ``limit`` items (for smoke runs);
             ``None`` (default) keeps them all.
 
     Returns:
-        list[dict]: one ``{"id", "prompt", "trajectory"[, "image"]}`` dict per
-        item, with any ``image`` resolved relative to the JSON file's directory.
+        list[dict]: one ``{"id", "prompt", "trajectory"[, "poses"][, "seed"][, "image"]}``
+        dict per item, with any ``image`` resolved relative to the JSON file's
+        directory.
 
     Raises:
         ValueError: if any item is missing ``id``.
@@ -88,6 +94,9 @@ def read_benchmark(path: str, limit: int | None = None) -> list[dict]:
             "prompt": item["caption"],
             "trajectory": item.get("trajectory"),
         }
+        for key in ("poses", "seed"):
+            if key in item:
+                sample[key] = item[key]
         image = item.get("image")
         if image is not None:
             if not os.path.isabs(image):
@@ -294,13 +303,15 @@ class BaseInferencer:
         Samples are sharded across the SP groups (``dp_size`` independent
         workers): ranks in one SP group take the same shard and cooperate on each
         sample's sequence, while that group's first rank writes its own outputs.
-        Each sample is seeded by its global index (``seed + index``) so its video
-        is identical regardless of ``sp_size`` / ``dp_size`` or shard order.
+        Each sample is seeded by its global index (``seed + index``), or by its
+        own ``seed`` if it has one, so its video is identical regardless of
+        ``sp_size`` / ``dp_size`` or shard order.
 
         Args:
             samples (list[dict] | None): per-sample dicts, each with a required
                 ``id`` (names the output ``{id}.mp4``) and a ``prompt``, plus
-                optional ``image`` (present -> i2v) and ``trajectory``. When
+                optional ``image`` (present -> i2v), ``trajectory`` / ``poses``
+                and ``seed``. When
                 ``None`` (default) they are loaded from ``inference.benchmark``
                 via :meth:`build_benchmark`.
         """
@@ -309,7 +320,11 @@ class BaseInferencer:
             samples = self.build_benchmark()
 
         out_dir = self.inference_cfg.get("output_dir", "outputs/infer")
-        writer = ResultWriter(out_dir, fps=int(self.inference_cfg.get("fps", 16)))
+        writer = ResultWriter(
+            out_dir,
+            fps=int(self.inference_cfg.get("fps", 16)),
+            save_frames=bool(self.inference_cfg.get("save_frames", False)),
+        )
         if self.is_writer:
             writer.ensure_dir()
 
@@ -321,12 +336,12 @@ class BaseInferencer:
             sample_id = sample["id"]
             # Per-sample seed decouples a sample's noise from processing order, so
             # sharding across DP workers cannot change its output.
-            sample_seed = self.seed + idx
+            sample_seed = sample.get("seed", self.seed + idx)
             set_seed(sample_seed)
-            # ``id`` is output-naming metadata, not a generation input: keep it off
+            # ``id`` / ``seed`` are metadata, not generation inputs: keep them off
             # the batch the pipeline sees. ``trajectory`` rides on the dict and is
             # consumed by the CameraTrajectory preprocessor.
-            batch_input = {k: v for k, v in sample.items() if k != "id"}
+            batch_input = {k: v for k, v in sample.items() if k not in ("id", "seed")}
             batch = self.build_batch(batch_input)
             result = self.loop.generate(batch)
             if self.is_writer:
@@ -396,11 +411,15 @@ class ResultWriter:
     keeps the latents next to it (as ``{name}.latents.pt``), since latent-space
     downstream use (policy eval, rollout re-feed, latent metrics) is a first-class
     world-model consumer that the old ``write_video``-only path discarded.
+    With ``save_frames`` it also writes the frames losslessly as
+    ``{name}.frames/00000.png ...``, for frame-based evaluators (e.g. WorldScore)
+    that should not score H.264 artifacts.
     """
 
-    def __init__(self, out_dir: str, *, fps: int = 16) -> None:
+    def __init__(self, out_dir: str, *, fps: int = 16, save_frames: bool = False) -> None:
         self.out_dir = out_dir
         self.fps = fps
+        self.save_frames = save_frames
 
     def ensure_dir(self) -> None:
         os.makedirs(self.out_dir, exist_ok=True)
@@ -425,6 +444,8 @@ class ResultWriter:
             return latents_path
         out_path = os.path.join(self.out_dir, f"{name}.mp4")
         self._save_video(video[0], out_path)
+        if self.save_frames:
+            self._save_frames(video[0], os.path.join(self.out_dir, f"{name}.frames"))
         return out_path
 
     def _save_video(self, video: torch.Tensor, path: str) -> None:
@@ -434,6 +455,22 @@ class ResultWriter:
 
         frames = (video * 255.0).clamp(0, 255).permute(0, 2, 3, 1).to(torch.uint8).cpu()
         write_video(path, frames, fps=self.fps)
+
+    def _save_frames(self, video: torch.Tensor, frames_dir: str) -> None:
+        """Save one ``[F,C,H,W]`` video tensor in ``[0,1]`` as numbered PNGs."""
+
+        from torchvision.io import write_png
+
+        frames = (video * 255.0).clamp(0, 255).to(torch.uint8).cpu()
+        # Write aside, then rename: a job killed mid-write must not leave a
+        # frames_dir that looks complete to a downstream reader.
+        tmp_dir = f"{frames_dir}.tmp"
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        os.makedirs(tmp_dir)
+        for i, frame in enumerate(frames):
+            write_png(frame, os.path.join(tmp_dir, f"{i:05d}.png"))
+        shutil.rmtree(frames_dir, ignore_errors=True)
+        os.replace(tmp_dir, frames_dir)
 
 
 def build_input_preprocessors(inference_cfg: dict) -> list[InferenceInputPreprocessor]:

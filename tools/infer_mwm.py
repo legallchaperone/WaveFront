@@ -2,7 +2,8 @@
 
 The benchmark to run is a config value: ``inference.benchmark`` points at a JSON
 file listing items, each carrying a required ``id`` (used to name the output
-``{id}.mp4``) and a ``caption``, plus an optional ``trajectory``; an ``image``
+``{id}.mp4``) and a ``caption``, plus an optional camera given either as a
+``trajectory`` string or as explicit per-latent-frame w2c ``poses``; an ``image``
 makes the item image-to-video (HY), and omitting it makes it text-to-video (Wan).
 
 ::
