@@ -38,56 +38,46 @@
 
 ## 一次性准备（Delta）
 
-以下没有在 Delta 上实际跑过，第一次照做时请留意报错。
+`setup_delta.sh` 在 `$WORK` 下一次装好全部东西：minWM 环境（`venvs/WaveFront`，就是 run-submit 会激活的那个）、WorldScore 环境（`venvs/worldscore`）、WorldScore 代码和指标权重、数据集、Wan 2.1 base 和 Stage 1 权重（`ckpts/`，仓库里的 `ckpts` 链接过去）。在登录节点后台跑，不需要 GPU，约 1 小时，大半是下载和编译 DROID-SLAM：
 
-1. **WorldScore 代码**，固定在接入时读过的 commit：
+```bash
+export WORK=/work/hdd/<项目>/$USER          # 也写进 ~/.bashrc
+git clone -b feature/benchmark https://github.com/legallchaperone/WaveFront.git $WORK/WaveFront
+cd $WORK/WaveFront
+nohup bash tools/eval/worldscore/setup_delta.sh > $WORK/setup_worldscore.log 2>&1 &
+```
 
-   ```bash
-   git clone https://github.com/haoyi-duan/WorldScore.git $WORK/WorldScore
-   git -C $WORK/WorldScore checkout 096c75fc4ada9c7d92e03140c3c1f0c8f383b61f
-   ```
-
-2. **WorldScore 的评测环境**：按它 README 的 "Evaluation → Environment Setup" 一节装（Python 3.10、torch 2.5.1 + cu121、编译 DROID-SLAM、Grounded-SAM、SAM2、VFIMamba，最后 `pip install .`）。DROID-SLAM 要编 CUDA 扩展，在 GPU 节点上（`srun`）装。环境建议放在 `$WORK/venvs/worldscore`，例如 `conda create -p $WORK/venvs/worldscore python=3.10`。它和 minWM 的环境（`$WORK/venvs/WaveFront`）分开，因为 torch 版本不同。
-
-3. **指标用的 checkpoint**：按它 README 的 "Download Evaluation Checkpoints" 一节下载，放到 `$WORK/WorldScore/worldscore/benchmark/metrics/checkpoints/`。它的列表漏了光流指标要用的 SEA-RAFT 权重（`Tartan-C-T-TSKH-spring540x960-M.pth`），没有它每个样例的打分都会失败，在 WorldScore 环境里另外取：
-
-   ```bash
-   $WORK/venvs/worldscore/bin/python tools/eval/worldscore/fetch_searaft.py --worldscore-root $WORK/WorldScore
-   ```
-
-4. **数据集**（1.2 GB）：
-
-   ```bash
-   mkdir -p $WORK/data && cd $WORK/data
-   wget https://huggingface.co/datasets/Howieeeee/WorldScore/resolve/main/WorldScore-Dataset.zip
-   unzip -q WorldScore-Dataset.zip && rm WorldScore-Dataset.zip
-   ```
-
-5. **minWM 的权重**：Wan 2.1 T2V 1.3B 的 base 和 Stage 1 权重，见仓库根目录 README 的 "Download the demo checkpoints"，Stage 1 的权重是 `Wan21/Action2V/ar_diffusion_tf`，链接成 `ckpts/Wan21/Action2V/stage1_ar_tf`。
-
-6. **环境变量**，写进 `~/.bashrc`：
-
-   ```bash
-   export WS_ROOT=$WORK/WorldScore
-   export WS_DATASET=$WORK/data/WorldScore-Dataset
-   export WS_PYTHON=$WORK/venvs/worldscore/bin/python
-   ```
+- **为什么在登录节点**：NCSA 的说明把装软件和传文件放在登录节点；计算节点能不能上网，文档里没有确切说法。
+- **CUDA**：WorldScore 环境用 torch 2.5.1+cu121，编译扩展要 CUDA 12 的 nvcc。Delta 默认加载的 `cudatoolkit` 是 CUDA 13.2，脚本会把它换成 `module load cuda/12.9`。
+- **之后只需要 `WORK`**：`run.sh` 的 `WS_ROOT`、`WS_DATASET`、`WS_PYTHON` 在设了 `WORK` 时默认指向这套布局。
+- 中途失败就重跑同一条命令，做完的步骤会跳过。WorldScore 环境单独重装用 `install_worldscore.sh`（Colab 也用它）。
+- 没装 flash-attn：minWM 的 attention 在没有它时自动退回 PyTorch 的 SDPA。
 
 ## 运行
 
-在仓库根目录，用 run-submit 提交。评测放可抢占的 `gpuA40x4-preempt`；被抢占就用同一个 run 名重交，每一步都会跳过已经做完的部分。
+在仓库根目录提交。评测放可抢占的 `gpuA40x4-preempt`（扣费系数 0.25）；被抢占就用同一个 run 名重交，每一步都会跳过已经做完的部分。
 
-**小 benchmark**：`run_small.sh` 固定那 16 个样例，默认评原版 minWM（Stage 1 权重，50 步 UniPC，CFG 3.0），同时当冒烟。第一个参数可以换推理 config，之后的参数原样传给 minWM，例如换权重 `inference.checkpoint=<路径>`：
+**小 benchmark**：`run_small.sh` 固定那 16 个样例，默认评原版 minWM（Stage 1 权重，50 步 UniPC，CFG 3.0），同时当冒烟。第一个参数可以换推理 config，之后的参数原样传给 minWM，例如换权重 `inference.checkpoint=<路径>`。一张 A40 估计 2–3 小时（未实测）：
 
 ```bash
-run-submit 2026-11-01-ws-minwm-s1 1 03:00:00 --partition=gpuA40x4-preempt -- \
+run-submit 2026-11-01-ws-minwm-s1 1 04:00:00 --partition=gpuA40x4-preempt -- \
   bash tools/eval/worldscore/run_small.sh
+```
+
+没有 run-submit 时直接用 sbatch，输出目录按同样的约定放（`<账号>` 见 `accounts`）：
+
+```bash
+run=2026-11-01-ws-minwm-s1; out=$WORK/outputs/WaveFront/$run; mkdir -p $out
+sbatch -J $run --account=<账号> --partition=gpuA40x4-preempt --requeue \
+  --nodes=1 --ntasks-per-node=1 --gpus-per-node=1 --cpus-per-task=16 --mem=60g --time=04:00:00 \
+  --output=$out/slurm-%j.out \
+  --wrap "source $WORK/venvs/WaveFront/bin/activate && OUT_DIR=$out bash tools/eval/worldscore/run_small.sh"
 ```
 
 扩到完整子集，用同一个 run 名改用 `run.sh` 重交，已有的 16 个直接沿用：
 
 ```bash
-run-submit 2026-11-01-ws-minwm-s1 4 08:00:00 --partition=gpuA40x4-preempt -- \
+run-submit 2026-11-01-ws-minwm-s1 4 12:00:00 --partition=gpuA40x4-preempt -- \
   bash tools/eval/worldscore/run.sh configs/wan21/action2v/infer/stage1_ar_tf.py
 ```
 

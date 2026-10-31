@@ -12,6 +12,7 @@
 #   WS_ROOT          WorldScore checkout (pinned commit, see README.md)
 #   WS_DATASET       the WorldScore-Dataset directory
 #   WS_PYTHON        python of the WorldScore environment (scoring)
+#                    (all three default to setup_delta.sh's layout under $WORK when it is set)
 #   WS_PREP_PYTHON   python for prepare.py (default WS_PYTHON); it imports WorldScore
 #                    from WS_ROOT, so the minWM env works without the WorldScore build
 #   WS_STAGE         all (default) | gen (prepare + generate) | score (score + summarize)
@@ -22,9 +23,13 @@ set -eo pipefail
 stage=${WS_STAGE:-all}
 case $stage in all | gen | score) ;; *) echo "WS_STAGE must be all, gen or score" >&2; exit 2 ;; esac
 if [ "$stage" != score ]; then
-  [ $# -ge 1 ] || { sed -n '2,19p' "$0"; exit 2; }
+  [ $# -ge 1 ] || { sed -n '2,20p' "$0"; exit 2; }
   cfg=$1
   shift
+fi
+if [ -n "${WORK:-}" ]; then
+  : "${WS_ROOT:=$WORK/WorldScore}" "${WS_DATASET:=$WORK/data/WorldScore-Dataset}"
+  : "${WS_PYTHON:=$WORK/venvs/worldscore/bin/python}"
 fi
 : "${WS_ROOT:?set WS_ROOT}" "${WS_DATASET:?set WS_DATASET}"
 [ "$stage" = gen ] && [ -n "${WS_PREP_PYTHON:-}" ] || : "${WS_PYTHON:?set WS_PYTHON}"
