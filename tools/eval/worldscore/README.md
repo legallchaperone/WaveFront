@@ -4,10 +4,18 @@
 
 ## 评什么
 
-- **静态**：写实风格、只有一段相机运动的样例，8 种运动（push_in、pull_out、move_left/right、orbit_left/right、pan_left/right）× 室内/室外 × 每组 6 个，共 96 个。
-- **动态**：写实风格，5 种运动类型（articulated、deformable、fluid、multi_motion、rigid）× 每类 5 个，共 25 个，相机固定。
-- 每个样例生成 77 个像素帧（20 个 latent 帧，5 个 chunk），832×480，16 fps。
-- 子集按固定种子抽，同样的参数抽到同样的样例，写在 `$OUT_DIR/subset/`。改了抽样参数就换一个 run 名。
+全部用写实风格。每个样例生成 77 个像素帧（20 个 latent 帧，5 个 chunk），832×480，16 fps。子集大小由 `WS_PREPARE_ARGS`（传给 `prepare.py`）决定：
+
+| 规模 | 内容 | 个数 | `WS_PREPARE_ARGS` |
+|---|---|---|---|
+| 最小 | 4 种运动 × 室内/室外 × 1 | 8 | `--moves push_in,move_left,orbit_left,pan_left --static-per-group 1 --dynamic-per-group 0` |
+| 小（Colab 默认） | 4 种运动 × 室内/室外 × 2 | 16 | `--moves push_in,move_left,orbit_left,pan_left --static-per-group 2 --dynamic-per-group 0` |
+| 完整（proposal 7.1） | 静态 8 种运动 × 室内/室外 × 6，加动态 5 类 × 5 | 121 | 空（默认） |
+
+- **小子集怎么选的**：左右对称的运动（move/orbit/pan 的 left 和 right）几何上等价，各留一个；pull_out 和 push_in 同理只留 push_in。剩下的 push_in、move_left、orbit_left 有视差，pan_left 没有，仍能做"有视差 / 无视差"的对比。动态子集（相机固定）用来检查各方法的动态有没有掉，只看原版 minWM 时用不上。
+- **小子集只够看效果、看视频**：每种运动只有 4 个（最小规模只有 2 个），单行的数字噪声很大；要比较方法，至少用完整规模的静态部分。
+- **子集只增不减**：同一个种子下，小的子集包含在大的里面。同一个 run 名先跑小的，再把 `WS_PREPARE_ARGS` 改大重跑，只会生成和评新增的样例，已有的直接沿用。改小、换风格或换种子会报错，要换 run 名。抽到的样例记在 `$OUT_DIR/subset/`。
+- **生成顺序**：每组先出一个，再每组出第二个，以此类推。中途停掉，已完成的部分也均匀覆盖各种运动。
 
 ## 怎么接的
 
@@ -22,11 +30,11 @@
 
 ## Colab
 
-不用 Delta 时，用同目录的 `colab.ipynb`：在 Colab 里打开（「文件 → 从 GitHub 打开」选这个分支的这个文件，或上传），运行时选 **A100**，从上往下运行。它装好两套环境、下载权重和数据，再调用同一个 `run.sh`。输出存在 Google Drive，会话断了重跑全部单元格即可接着做。
+不用 Delta 时，用同目录的 `colab.ipynb`：在 Colab 里打开（「文件 → 从 GitHub 打开」选这个分支的这个文件，或上传），运行时选 **A100**，从上往下运行全部单元格。输出存在 Google Drive，会话断了重跑全部单元格即可接着做。
 
 - **卡**：A100 40 GB。推理时 T5 编码器（11 GB）、DiT、CFG 的两份 KV cache（约 11.5 GB）和 VAE 解码都在卡上，估计峰值 30 GB 以上，L4（24 GB）和 T4（16 GB，且不支持 bf16）不行。H100 可以，笔记本会给 DROID-SLAM 补编 sm_90。
-- **每个新会话**重装环境约 30–40 分钟（编译 DROID-SLAM 最久）。
-- 冒烟和完整子集用同一个 RUN_NAME，冒烟生成的 2 个样例会直接沿用。
+- **省时间**：WorldScore 环境的编译（约 30–40 分钟，主要是 DROID-SLAM）只吃 CPU，笔记本让它在后台跑，同时在前台装 minWM、下载权重、生成视频（`WS_STAGE=gen`），生成完再等编译结束、打分（`WS_STAGE=score`）。`prepare.py` 直接从 `WS_ROOT` 导入 WorldScore 的纯 Python 部分，所以生成不用等编译。
+- **耗时估计**（A100，未实测）：小子集约 1.5 小时（装环境和下载 10 分钟、生成 16 × 2–3 分钟、打分 16 × 1.5–3 分钟，编译藏在生成后面），完整子集约 9–11 小时。
 
 ## 一次性准备（Delta）
 
@@ -41,7 +49,11 @@
 
 2. **WorldScore 的评测环境**：按它 README 的 "Evaluation → Environment Setup" 一节装（Python 3.10、torch 2.5.1 + cu121、编译 DROID-SLAM、Grounded-SAM、SAM2、VFIMamba，最后 `pip install .`）。DROID-SLAM 要编 CUDA 扩展，在 GPU 节点上（`srun`）装。环境建议放在 `$WORK/venvs/worldscore`，例如 `conda create -p $WORK/venvs/worldscore python=3.10`。它和 minWM 的环境（`$WORK/venvs/WaveFront`）分开，因为 torch 版本不同。
 
-3. **指标用的 checkpoint**：按它 README 的 "Download Evaluation Checkpoints" 一节下载，放到 `$WORK/WorldScore/worldscore/benchmark/metrics/checkpoints/`。
+3. **指标用的 checkpoint**：按它 README 的 "Download Evaluation Checkpoints" 一节下载，放到 `$WORK/WorldScore/worldscore/benchmark/metrics/checkpoints/`。它的列表漏了光流指标要用的 SEA-RAFT 权重（`Tartan-C-T-TSKH-spring540x960-M.pth`），没有它每个样例的打分都会失败，在 WorldScore 环境里另外取：
+
+   ```bash
+   $WORK/venvs/worldscore/bin/python tools/eval/worldscore/fetch_searaft.py --worldscore-root $WORK/WorldScore
+   ```
 
 4. **数据集**（1.2 GB）：
 
@@ -65,14 +77,15 @@
 
 在仓库根目录，用 run-submit 提交。评测放可抢占的 `gpuA40x4-preempt`；被抢占就用同一个 run 名重交，每一步都会跳过已经做完的部分。
 
-先冒烟，只生成并评 2 个样例：
+原版 minWM（Stage 1 权重，50 步 UniPC，CFG 3.0）的小子集，同时当冒烟：
 
 ```bash
-run-submit 2026-11-01-ws-smoke 1 01:00:00 --partition=gpuA40x4-preempt -- \
-  bash tools/eval/worldscore/run.sh configs/wan21/action2v/infer/stage1_ar_tf.py inference.limit=2
+run-submit 2026-11-01-ws-minwm-s1 1 03:00:00 --partition=gpuA40x4-preempt -- \
+  env WS_PREPARE_ARGS="--moves push_in,move_left,orbit_left,pan_left --static-per-group 2 --dynamic-per-group 0" \
+  bash tools/eval/worldscore/run.sh configs/wan21/action2v/infer/stage1_ar_tf.py
 ```
 
-原版 minWM（Stage 1 权重，50 步 UniPC，CFG 3.0）的完整子集：
+扩到完整子集，用同一个 run 名重交，不设 `WS_PREPARE_ARGS`，已有的 16 个直接沿用：
 
 ```bash
 run-submit 2026-11-01-ws-minwm-s1 4 08:00:00 --partition=gpuA40x4-preempt -- \
@@ -81,7 +94,8 @@ run-submit 2026-11-01-ws-minwm-s1 4 08:00:00 --partition=gpuA40x4-preempt -- \
 
 - `run.sh` 第一个参数是 minWM 的推理 config，后面的参数原样传给 `tools/infer_mwm.py`，例如换权重：`inference.checkpoint=<路径>`。
 - 换成 4 步的 DMD 权重只需换 config：`configs/wan21/action2v/infer/stage3_ar_dmd.py`，快得多，适合先看一眼流程。
-- `WS_PREPARE_ARGS` 可以改抽样，例如 `env WS_PREPARE_ARGS="--static-per-group 2" bash tools/eval/worldscore/run.sh ...`。改了就换 run 名。
+- `WS_PREPARE_ARGS` 改抽样，见上面"评什么"的表；只能改大，改小要换 run 名。
+- `WS_STAGE=gen` 只准备和生成，`WS_STAGE=score` 只打分和汇总（不需要 config 参数），默认 `all` 两者都做。
 - 生成和打分都是每张卡一个进程。耗时还没实测：粗估 Stage 1 在 A40 上每个视频几分钟，WorldScore 每个样例也是几分钟（DROID-SLAM 要跑两遍）。冒烟之后用实测值重新估 walltime。
 
 ## 输出（`$OUT_DIR`）

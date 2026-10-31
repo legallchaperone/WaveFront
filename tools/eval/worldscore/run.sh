@@ -6,19 +6,29 @@
 #
 # Usage (from the repo root, in the minWM environment):
 #   bash tools/eval/worldscore/run.sh <minWM infer config> [dotlist overrides...]
+#   WS_STAGE=score bash tools/eval/worldscore/run.sh
 #
 # Environment:
 #   WS_ROOT          WorldScore checkout (pinned commit, see README.md)
 #   WS_DATASET       the WorldScore-Dataset directory
-#   WS_PYTHON        python of the WorldScore environment
+#   WS_PYTHON        python of the WorldScore environment (scoring)
+#   WS_PREP_PYTHON   python for prepare.py (default WS_PYTHON); it imports WorldScore
+#                    from WS_ROOT, so the minWM env works without the WorldScore build
+#   WS_STAGE         all (default) | gen (prepare + generate) | score (score + summarize)
 #   OUT_DIR          output root (set by run-submit; default ./local/worldscore)
-#   WS_PREPARE_ARGS  extra prepare.py flags, e.g. "--static-per-group 1 --dynamic-per-group 1"
+#   WS_PREPARE_ARGS  extra prepare.py flags, e.g. "--static-per-group 1 --dynamic-per-group 0"
 set -eo pipefail
 
-[ $# -ge 1 ] || { sed -n '2,15p' "$0"; exit 2; }
-cfg=$1
-shift
-: "${WS_ROOT:?set WS_ROOT}" "${WS_DATASET:?set WS_DATASET}" "${WS_PYTHON:?set WS_PYTHON}"
+stage=${WS_STAGE:-all}
+case $stage in all | gen | score) ;; *) echo "WS_STAGE must be all, gen or score" >&2; exit 2 ;; esac
+if [ "$stage" != score ]; then
+  [ $# -ge 1 ] || { sed -n '2,19p' "$0"; exit 2; }
+  cfg=$1
+  shift
+fi
+: "${WS_ROOT:?set WS_ROOT}" "${WS_DATASET:?set WS_DATASET}"
+[ "$stage" = gen ] && [ -n "${WS_PREP_PYTHON:-}" ] || : "${WS_PYTHON:?set WS_PYTHON}"
+prep_python=${WS_PREP_PYTHON:-$WS_PYTHON}
 out=${OUT_DIR:-./local/worldscore}
 gen=$out/gen
 here=$(dirname "$0")
@@ -27,22 +37,25 @@ ws_args=(--worldscore-root "$WS_ROOT" --dataset-root "$WS_DATASET" --runs-root "
 if [ -n "${CUDA_VISIBLE_DEVICES:-}" ]; then
   IFS=, read -ra gpus <<<"$CUDA_VISIBLE_DEVICES"
 else
-  mapfile -t gpus < <(nvidia-smi --query-gpu=index --format=csv,noheader)
+  # shellcheck disable=SC2207  # GPU indices have no spaces
+  gpus=($(nvidia-smi --query-gpu=index --format=csv,noheader))
 fi
 ngpu=${#gpus[@]}
 
 mkdir -p "$out"
 git -C "$WS_ROOT" rev-parse HEAD >"$out/worldscore_commit.txt"
-
 python "$here/pack.py" --gen-dir "$gen" --runs-root "$out"
-# shellcheck disable=SC2086  # WS_PREPARE_ARGS is a flag list
-"$WS_PYTHON" "$here/prepare.py" "${ws_args[@]}" --bench "$out/bench.json" ${WS_PREPARE_ARGS:-}
 
-if python -c 'import json, sys; sys.exit(not json.load(open(sys.argv[1])))' "$out/bench.json"; then
-  torchrun --standalone --nproc_per_node="$ngpu" tools/infer_mwm.py --config-file "$cfg" \
-    inference.benchmark="$out/bench.json" inference.output_dir="$gen" inference.save_frames=True "$@"
-  python "$here/pack.py" --gen-dir "$gen" --runs-root "$out"
+if [ "$stage" != score ]; then
+  # shellcheck disable=SC2086  # WS_PREPARE_ARGS is a flag list
+  "$prep_python" "$here/prepare.py" "${ws_args[@]}" --bench "$out/bench.json" ${WS_PREPARE_ARGS:-}
+  if python -c 'import json, sys; sys.exit(not json.load(open(sys.argv[1])))' "$out/bench.json"; then
+    torchrun --standalone --nproc_per_node="$ngpu" tools/infer_mwm.py --config-file "$cfg" \
+      inference.benchmark="$out/bench.json" inference.output_dir="$gen" inference.save_frames=True "$@"
+    python "$here/pack.py" --gen-dir "$gen" --runs-root "$out"
+  fi
 fi
+[ "$stage" != gen ] || exit 0
 
 status=0
 pids=()

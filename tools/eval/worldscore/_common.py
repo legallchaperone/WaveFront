@@ -27,6 +27,18 @@ _ID_SEP = "--"
 _SAFE_ID = re.compile(r"[A-Za-z0-9._-]+")
 _GL_TO_CV = np.diag([1.0, -1.0, -1.0, 1.0])
 
+# WorldScore's single-move static camera layouts, in report order.
+CAMERA_MOVES = (
+    "push_in",
+    "pull_out",
+    "move_left",
+    "move_right",
+    "orbit_left",
+    "orbit_right",
+    "pan_left",
+    "pan_right",
+)
+
 # Sign of (position x, position z, forward x) of the last camera, in the first
 # camera's OpenCV frame (x right, z forward); 0 means "about zero". An orbit moves
 # sideways and slightly forward while turning back toward the target ahead.

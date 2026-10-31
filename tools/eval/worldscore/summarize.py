@@ -4,7 +4,8 @@ Writes ``summary.md`` and ``summary.json`` under the run's output root. Aspect
 columns are WorldScore's normalized scores x100, aggregated with its formula
 (per-metric mean over instances, then mean over the aspect's metrics); the
 overall WorldScore-Static / -Dynamic use its formula too, but over this subset
-only, so they are not comparable with the leaderboard. Raw columns are means of
+only, so they are not comparable with the leaderboard (-Dynamic and the dynamic
+table only when the run has the dynamic split). Raw columns are means of
 the unnormalized metrics, leaving out WorldScore's error sentinel (+-100), whose
 count is reported instead::
 
@@ -17,7 +18,7 @@ import os
 from collections import defaultdict
 from statistics import mean
 
-from _common import instance_dirs
+from _common import CAMERA_MOVES, instance_dirs
 
 STATIC_ASPECTS = (
     "camera_control",
@@ -39,16 +40,6 @@ DYNAMIC_RAW = {
     "motion acc": ("motion_accuracy", "motion_accuracy", None),
     "flow mag": ("motion_magnitude", "optical_flow", None),
 }
-MOVES = (
-    "push_in",
-    "pull_out",
-    "move_left",
-    "move_right",
-    "orbit_left",
-    "orbit_right",
-    "pan_left",
-    "pan_right",
-)
 # Only translation makes parallax; a pan rotates in place.
 NO_PARALLAX = {"pan_left", "pan_right"}
 _SENTINELS = (100, -100)
@@ -142,7 +133,7 @@ def main() -> None:
     args = parse_args()
     static, dynamic = load(args.runs_root, "static"), load(args.runs_root, "dynamic")
 
-    present = [m for m in MOVES if m in {g for g, _ in static}]
+    present = [m for m in CAMERA_MOVES if m in {g for g, _ in static}]
     static_groups = {g: {g} for g in present}
     static_groups["有视差（push/pull/move/orbit）"] = set(present) - NO_PARALLAX
     static_groups["无视差（pan）"] = set(present) & NO_PARALLAX
@@ -158,10 +149,10 @@ def main() -> None:
     dynamic_all = aspect_scores([ev for _, ev in dynamic if ev], DYNAMIC_ASPECTS)
     # WorldScore counts an aspect with no scored instance as 0.
     static_vals = [static_all[a] or 0.0 for a in STATIC_ASPECTS]
-    overall = {
-        "WorldScore-Static": mean(static_vals),
-        "WorldScore-Dynamic": mean(static_vals + [dynamic_all[a] or 0.0 for a in DYNAMIC_ASPECTS]),
-    }
+    overall = {"WorldScore-Static": mean(static_vals)}
+    if dynamic:
+        dynamic_vals = [dynamic_all[a] or 0.0 for a in DYNAMIC_ASPECTS]
+        overall["WorldScore-Dynamic"] = mean(static_vals + dynamic_vals)
 
     common = ["group", "scored", "total", "sentinels"]
     report = [
@@ -174,11 +165,14 @@ def main() -> None:
         "",
         markdown_table(static_rows, common + list(STATIC_ASPECTS) + list(STATIC_RAW)),
         "",
-        "## 动态，按运动类型",
-        "",
-        markdown_table(dynamic_rows, common + list(DYNAMIC_ASPECTS) + list(DYNAMIC_RAW)),
-        "",
     ]
+    if dynamic:
+        report += [
+            "## 动态，按运动类型",
+            "",
+            markdown_table(dynamic_rows, common + list(DYNAMIC_ASPECTS) + list(DYNAMIC_RAW)),
+            "",
+        ]
     with open(os.path.join(args.runs_root, "summary.md"), "w", encoding="utf-8") as f:
         f.write("\n".join(report))
     with open(os.path.join(args.runs_root, "summary.json"), "w", encoding="utf-8") as f:

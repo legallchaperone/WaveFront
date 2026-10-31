@@ -104,12 +104,61 @@ def test_instance_seed_is_fixed_by_id():
     assert 0 <= _common.instance_seed(a) < 2**31
 
 
-def test_select_subset_is_stratified_and_seeded():
-    items = [{"image": f"{g}/{i:03d}.jpg", "g": g} for g in "abc" for i in range(10)]
-    first = prepare.select_subset(items, lambda x: (x["g"],), per_group=3, seed=0)
-    assert [x["g"] for x in first] == list("aaabbbccc")
-    assert first == prepare.select_subset(list(reversed(items)), lambda x: (x["g"],), 3, 0)
-    assert len(prepare.select_subset(items, lambda x: (x["g"],), per_group=50, seed=0)) == 30
+def _items(groups: str = "abc", per: int = 10) -> list[dict]:
+    return [{"image": f"{g}/{i:03d}.jpg", "g": g} for g in groups for i in range(per)]
+
+
+def _group(x: dict) -> tuple:
+    return (x["g"],)
+
+
+def test_select_subset_is_stratified_rank_major_and_seeded():
+    first = prepare.select_subset(_items(), _group, per_group=3, seed=0)
+    assert [x["g"] for x in first] == list("abcabcabc")
+    assert first == prepare.select_subset(list(reversed(_items())), _group, 3, 0)
+    assert first != prepare.select_subset(_items(), _group, 3, 1)
+    assert len(prepare.select_subset(_items(), _group, per_group=50, seed=0)) == 30
+
+
+def test_select_subset_is_nested_across_sizes_and_groups():
+    small = prepare.select_subset(_items("ab"), _group, per_group=2, seed=0)
+    large = prepare.select_subset(_items("abc"), _group, per_group=6, seed=0)
+    assert all(item in large for item in small)
+
+
+def test_write_subset_may_grow_but_not_shrink(tmp_path):
+    path = str(tmp_path / "subset" / "static.json")
+    small = prepare.select_subset(_items(), _group, per_group=2, seed=0)
+    large = prepare.select_subset(_items(), _group, per_group=4, seed=0)
+    prepare.write_subset(path, small)
+    prepare.write_subset(path, large)
+    with open(path) as f:
+        assert json.load(f) == large
+    with pytest.raises(SystemExit, match="only grow"):
+        prepare.write_subset(path, small)
+
+
+def test_unknown_move_is_rejected(monkeypatch):
+    argv = ["prepare.py", "--worldscore-root", "w", "--dataset-root", "d", "--runs-root", "r"]
+    monkeypatch.setattr(sys, "argv", argv + ["--bench", "b", "--moves", "push_in,zoom"])
+    with pytest.raises(SystemExit):
+        prepare.parse_args()
+
+
+def test_summary_without_dynamic_split_has_no_dynamic_score(tmp_path, monkeypatch):
+    instance = tmp_path / _common.OUTPUT_DIR / "static" / "photorealistic" / "indoor" / "c" / "000"
+    instance.mkdir(parents=True)
+    (instance / "image_data.json").write_text(json.dumps({"camera_path": ["pan_left"]}))
+    evaluation = {"3d_consistency": {"reprojection_error": {"score": 0.2, "score_normalized": 0.9}}}
+    (instance / "evaluation.json").write_text(json.dumps(evaluation))
+    monkeypatch.setattr(sys, "argv", ["summarize.py", "--runs-root", str(tmp_path)])
+    summarize.main()
+    with open(tmp_path / "summary.json") as f:
+        summary = json.load(f)
+    assert list(summary["overall"]) == ["WorldScore-Static"]
+    assert "动态" not in (tmp_path / "summary.md").read_text()
+    pan = next(row for row in summary["static"] if row["group"] == "pan_left")
+    assert pan["3d_consistency"] == pytest.approx(90.0)
 
 
 def test_summary_follows_worldscore_aggregation_and_skips_sentinels():
