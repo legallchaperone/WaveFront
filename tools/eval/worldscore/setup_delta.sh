@@ -55,11 +55,14 @@ if [ ! -d "$WORK/data/WorldScore-Dataset" ]; then
 fi
 
 step "WorldScore env"
-# Delta's default cudatoolkit is CUDA 13; torch 2.5.1+cu121 needs a CUDA 12 nvcc.
-if [ -z "${CUDA_HOME:-}" ] && type module >/dev/null 2>&1; then
+# torch 2.5.1+cu121 needs a CUDA 12 nvcc. Delta's default cudatoolkit module is
+# CUDA 13 and sets CUDA_HOME to it, so swap whenever the current toolkit isn't 12.
+cuda_release() { "${CUDA_HOME:+$CUDA_HOME/bin/}nvcc" --version 2>/dev/null | sed -n 's/.*release \([0-9]*\)\..*/\1/p'; }
+if [ "$(cuda_release)" != 12 ] && type module >/dev/null 2>&1; then
   module unload cudatoolkit 2>/dev/null || true
   module load cuda/12.9
 fi
+echo "CUDA_HOME=$CUDA_HOME (CUDA $(cuda_release))"
 WS_ROOT=$WORK/WorldScore WS_VENV=$WORK/venvs/worldscore UV=uv \
   bash tools/eval/worldscore/install_worldscore.sh
 
