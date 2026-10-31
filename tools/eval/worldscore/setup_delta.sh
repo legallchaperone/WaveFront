@@ -1,6 +1,6 @@
 #!/bin/bash
 # One-time setup for the WorldScore benchmark on NCSA Delta, everything under $WORK:
-#   $WORK/venvs/WaveFront     minWM env (the one run-submit activates)
+#   $WORK/venvs/WaveFront     minWM env (submit_delta.sh activates it in the job)
 #   $WORK/venvs/worldscore    WorldScore env (install_worldscore.sh)
 #   $WORK/WorldScore          WorldScore checkout + metric checkpoints
 #   $WORK/data/WorldScore-Dataset

@@ -38,7 +38,7 @@
 
 ## 一次性准备（Delta）
 
-`setup_delta.sh` 在 `$WORK` 下一次装好全部东西：minWM 环境（`venvs/WaveFront`，就是 run-submit 会激活的那个）、WorldScore 环境（`venvs/worldscore`）、WorldScore 代码和指标权重、数据集、Wan 2.1 base 和 Stage 1 权重（`ckpts/`，仓库里的 `ckpts` 链接过去）。在登录节点后台跑，不需要 GPU，约 1 小时，大半是下载和编译 DROID-SLAM：
+`setup_delta.sh` 在 `$WORK` 下一次装好全部东西：minWM 环境（`venvs/WaveFront`）、WorldScore 环境（`venvs/worldscore`）、WorldScore 代码和指标权重、数据集、Wan 2.1 base 和 Stage 1 权重（`ckpts/`，仓库里的 `ckpts` 链接过去）。在登录节点后台跑，不需要 GPU，约 1 小时，大半是下载和编译 DROID-SLAM：
 
 ```bash
 export WORK=/work/hdd/<项目>/$USER          # 也写进 ~/.bashrc
@@ -55,32 +55,25 @@ nohup bash tools/eval/worldscore/setup_delta.sh > $WORK/setup_worldscore.log 2>&
 
 ## 运行
 
-在仓库根目录提交。评测放可抢占的 `gpuA40x4-preempt`（扣费系数 0.25）；被抢占就用同一个 run 名重交，每一步都会跳过已经做完的部分。
+在 Delta 的仓库根目录用 `submit_delta.sh` 提交，它生成作业脚本、交给 sbatch，所有输出放进 `$WORK/outputs/WaveFront/<run 名>/`（`summary.md`、样例目录和视频、`slurm-<作业号>.out`、提交的作业脚本 `job-<作业号>.sbatch`）。默认用可抢占的 `gpuA40x4-preempt`（扣费系数 0.25），被抢占会自动重新排队；作业失败或超时就用同一个 run 名重交，每一步都会跳过已经做完的部分。
 
-**小 benchmark**：`run_small.sh` 固定那 16 个样例，默认评原版 minWM（Stage 1 权重，50 步 UniPC，CFG 3.0），同时当冒烟。第一个参数可以换推理 config，之后的参数原样传给 minWM，例如换权重 `inference.checkpoint=<路径>`。一张 A40 估计 2–3 小时（未实测）：
-
-```bash
-run-submit 2026-11-01-ws-minwm-s1 1 04:00:00 --partition=gpuA40x4-preempt -- \
-  bash tools/eval/worldscore/run_small.sh
-```
-
-没有 run-submit 时直接用 sbatch，输出目录按同样的约定放（`<账号>` 见 `accounts`）：
+**小 benchmark**：`run_small.sh` 固定那 16 个样例，默认评原版 minWM（Stage 1 权重，50 步 UniPC，CFG 3.0），同时当冒烟。一张 A40，估计 2–3 小时（未实测），默认给 4 小时：
 
 ```bash
-run=2026-11-01-ws-minwm-s1; out=$WORK/outputs/WaveFront/$run; mkdir -p $out
-sbatch -J $run --account=<账号> --partition=gpuA40x4-preempt --requeue \
-  --nodes=1 --ntasks-per-node=1 --gpus-per-node=1 --cpus-per-task=16 --mem=60g --time=04:00:00 \
-  --output=$out/slurm-%j.out \
-  --wrap "source $WORK/venvs/WaveFront/bin/activate && OUT_DIR=$out bash tools/eval/worldscore/run_small.sh"
+bash tools/eval/worldscore/submit_delta.sh 2026-11-01-ws-minwm-s1
 ```
 
-扩到完整子集，用同一个 run 名改用 `run.sh` 重交，已有的 16 个直接沿用：
+换模型就在 run 名后面写 `run_small.sh`、推理 config 和覆盖项，例如 `... 2026-11-02-ws-x run_small.sh configs/wan21/action2v/infer/stage1_ar_tf.py inference.checkpoint=<路径>`。
+
+**扩到完整子集**（121 个），用同一个 run 名改用 `run.sh`，已有的 16 个直接沿用：
 
 ```bash
-run-submit 2026-11-01-ws-minwm-s1 4 12:00:00 --partition=gpuA40x4-preempt -- \
-  bash tools/eval/worldscore/run.sh configs/wan21/action2v/infer/stage1_ar_tf.py
+NGPU=4 TIME=12:00:00 bash tools/eval/worldscore/submit_delta.sh 2026-11-01-ws-minwm-s1 run.sh \
+  configs/wan21/action2v/infer/stage1_ar_tf.py
 ```
 
+- Slurm 参数用环境变量改：`ACCOUNT`（默认 `bjki-delta-gpu`）、`PARTITION`、`NGPU`（每卡配 16 个 CPU、60 GB 内存）、`TIME`。
+- 看进度：`squeue -u $USER`，`tail -f $WORK/outputs/WaveFront/<run 名>/slurm-<作业号>.out`。
 - `run.sh` 第一个参数是 minWM 的推理 config，后面的参数原样传给 `tools/infer_mwm.py`，例如换权重：`inference.checkpoint=<路径>`。
 - 换成 4 步的 DMD 权重只需换 config：`configs/wan21/action2v/infer/stage3_ar_dmd.py`，快得多，适合先看一眼流程。
 - `WS_PREPARE_ARGS` 改抽样，见上面"评什么"的表；只能改大，改小要换 run 名。
@@ -100,12 +93,13 @@ run-submit 2026-11-01-ws-minwm-s1 4 12:00:00 --partition=gpuA40x4-preempt -- \
 | `eval-shard*.log` | 打分日志，某个样例报错时看这里 |
 | `subset/`、`worldscore_commit.txt` | 抽到的样例、WorldScore 的 commit |
 | `gen_args.txt` | 第一次生成时的推理 config 和覆盖项 |
+| `slurm-<作业号>.out`、`job-<作业号>.sbatch` | Delta 作业日志和提交的作业脚本（`submit_delta.sh` 写） |
 
 把视频拉回 Mac 看：
 
 ```bash
 rsync -a --include='*/' --include='output.mp4' --exclude='*' \
-  delta:<OUT_DIR>/worldscore_output/ ./local/ws_videos/
+  delta:/work/hdd/bjki/wchen38/outputs/WaveFront/<run 名>/worldscore_output/ ./local/ws_videos/
 ```
 
 ## 读 summary

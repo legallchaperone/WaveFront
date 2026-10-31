@@ -16,9 +16,8 @@
 # WS_DATASET, WS_PYTHON, WS_PREP_PYTHON, WS_STAGE); OUT_DIR defaults to
 # ./local/worldscore-small. WS_PREPARE_ARGS is set here and must not be.
 #
-# Delta (one A40; about 2-3 h estimated, unmeasured; see README.md for plain sbatch):
-#   run-submit 2026-11-01-ws-small-s1 1 04:00:00 --partition=gpuA40x4-preempt -- \
-#     bash tools/eval/worldscore/run_small.sh
+# Delta (one A40, about 2-3 h estimated, unmeasured):
+#   bash tools/eval/worldscore/submit_delta.sh <run name>
 # Colab: tools/eval/worldscore/colab.ipynb calls this script.
 set -eo pipefail
 

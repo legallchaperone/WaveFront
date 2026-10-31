@@ -16,7 +16,7 @@
 #   WS_PREP_PYTHON   python for prepare.py (default WS_PYTHON); it imports WorldScore
 #                    from WS_ROOT, so the minWM env works without the WorldScore build
 #   WS_STAGE         all (default) | gen (prepare + generate) | score (score + summarize)
-#   OUT_DIR          output root (set by run-submit; default ./local/worldscore)
+#   OUT_DIR          output root (set by submit_delta.sh; default ./local/worldscore)
 #   WS_PREPARE_ARGS  extra prepare.py flags, e.g. "--static-per-group 1 --dynamic-per-group 0"
 set -eo pipefail
 
