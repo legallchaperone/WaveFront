@@ -47,6 +47,18 @@ git -C "$WS_ROOT" rev-parse HEAD >"$out/worldscore_commit.txt"
 python "$here/pack.py" --gen-dir "$gen" --runs-root "$out"
 
 if [ "$stage" != score ]; then
+  # One OUT_DIR = one model: refuse to resume with another config or overrides,
+  # which would mix two models' videos in one table. inference.limit may differ.
+  gen_args=$(printf '%s\n' "$cfg" "$@" | grep -v '^inference\.limit=' || true)
+  if [ -f "$out/gen_args.txt" ]; then
+    if [ "$gen_args" != "$(cat "$out/gen_args.txt")" ]; then
+      printf '%s was generated with:\n%s\nnot:\n%s\nUse a new OUT_DIR (run name) for another model.\n' \
+        "$out" "$(cat "$out/gen_args.txt")" "$gen_args" >&2
+      exit 2
+    fi
+  else
+    printf '%s\n' "$gen_args" >"$out/gen_args.txt"
+  fi
   # shellcheck disable=SC2086  # WS_PREPARE_ARGS is a flag list
   "$prep_python" "$here/prepare.py" "${ws_args[@]}" --bench "$out/bench.json" ${WS_PREPARE_ARGS:-}
   if python -c 'import json, sys; sys.exit(not json.load(open(sys.argv[1])))' "$out/bench.json"; then

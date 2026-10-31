@@ -9,7 +9,7 @@
 | 规模 | 内容 | 个数 | `WS_PREPARE_ARGS` |
 |---|---|---|---|
 | 最小 | 4 种运动 × 室内/室外 × 1 | 8 | `--moves push_in,move_left,orbit_left,pan_left --static-per-group 1 --dynamic-per-group 0` |
-| 小（Colab 默认） | 4 种运动 × 室内/室外 × 2 | 16 | `--moves push_in,move_left,orbit_left,pan_left --static-per-group 2 --dynamic-per-group 0` |
+| **小 benchmark**（`run_small.sh`，Colab 默认） | 4 种运动 × 室内/室外 × 2 | 16 | 由 `run_small.sh` 固定：`--moves push_in,move_left,orbit_left,pan_left --static-per-group 2 --dynamic-per-group 0` |
 | 完整（proposal 7.1） | 静态 8 种运动 × 室内/室外 × 6，加动态 5 类 × 5 | 121 | 空（默认） |
 
 - **小子集怎么选的**：左右对称的运动（move/orbit/pan 的 left 和 right）几何上等价，各留一个；pull_out 和 push_in 同理只留 push_in。剩下的 push_in、move_left、orbit_left 有视差，pan_left 没有，仍能做"有视差 / 无视差"的对比。动态子集（相机固定）用来检查各方法的动态有没有掉，只看原版 minWM 时用不上。
@@ -30,7 +30,7 @@
 
 ## Colab
 
-不用 Delta 时，用同目录的 `colab.ipynb`：在 Colab 里打开（「文件 → 从 GitHub 打开」选这个分支的这个文件，或上传），运行时选 **A100**，从上往下运行全部单元格。输出存在 Google Drive，会话断了重跑全部单元格即可接着做。
+不用 Delta 时，用同目录的 `colab.ipynb`（默认调用 `run_small.sh`）：在 Colab 里打开（「文件 → 从 GitHub 打开」选这个分支的这个文件，或上传），运行时选 **A100**，从上往下运行全部单元格。输出存在 Google Drive，会话断了重跑全部单元格即可接着做。
 
 - **卡**：A100 40 GB。推理时 T5 编码器（11 GB）、DiT、CFG 的两份 KV cache（约 11.5 GB）和 VAE 解码都在卡上，估计峰值 30 GB 以上，L4（24 GB）和 T4（16 GB，且不支持 bf16）不行。H100 可以，笔记本会给 DROID-SLAM 补编 sm_90。
 - **省时间**：WorldScore 环境的编译（约 30–40 分钟，主要是 DROID-SLAM）只吃 CPU，笔记本让它在后台跑，同时在前台装 minWM、下载权重、生成视频（`WS_STAGE=gen`），生成完再等编译结束、打分（`WS_STAGE=score`）。`prepare.py` 直接从 `WS_ROOT` 导入 WorldScore 的纯 Python 部分，所以生成不用等编译。
@@ -77,15 +77,14 @@
 
 在仓库根目录，用 run-submit 提交。评测放可抢占的 `gpuA40x4-preempt`；被抢占就用同一个 run 名重交，每一步都会跳过已经做完的部分。
 
-原版 minWM（Stage 1 权重，50 步 UniPC，CFG 3.0）的小子集，同时当冒烟：
+**小 benchmark**：`run_small.sh` 固定那 16 个样例，默认评原版 minWM（Stage 1 权重，50 步 UniPC，CFG 3.0），同时当冒烟。第一个参数可以换推理 config，之后的参数原样传给 minWM，例如换权重 `inference.checkpoint=<路径>`：
 
 ```bash
 run-submit 2026-11-01-ws-minwm-s1 1 03:00:00 --partition=gpuA40x4-preempt -- \
-  env WS_PREPARE_ARGS="--moves push_in,move_left,orbit_left,pan_left --static-per-group 2 --dynamic-per-group 0" \
-  bash tools/eval/worldscore/run.sh configs/wan21/action2v/infer/stage1_ar_tf.py
+  bash tools/eval/worldscore/run_small.sh
 ```
 
-扩到完整子集，用同一个 run 名重交，不设 `WS_PREPARE_ARGS`，已有的 16 个直接沿用：
+扩到完整子集，用同一个 run 名改用 `run.sh` 重交，已有的 16 个直接沿用：
 
 ```bash
 run-submit 2026-11-01-ws-minwm-s1 4 08:00:00 --partition=gpuA40x4-preempt -- \
@@ -95,6 +94,7 @@ run-submit 2026-11-01-ws-minwm-s1 4 08:00:00 --partition=gpuA40x4-preempt -- \
 - `run.sh` 第一个参数是 minWM 的推理 config，后面的参数原样传给 `tools/infer_mwm.py`，例如换权重：`inference.checkpoint=<路径>`。
 - 换成 4 步的 DMD 权重只需换 config：`configs/wan21/action2v/infer/stage3_ar_dmd.py`，快得多，适合先看一眼流程。
 - `WS_PREPARE_ARGS` 改抽样，见上面"评什么"的表；只能改大，改小要换 run 名。
+- **一个 run 名只评一个模型**：第一次生成时把推理 config 和覆盖项记进 `gen_args.txt`，之后换了 config 或权重再接着跑会报错，免得一张表里混进两个模型（`inference.limit` 不算）。
 - `WS_STAGE=gen` 只准备和生成，`WS_STAGE=score` 只打分和汇总（不需要 config 参数），默认 `all` 两者都做。
 - 生成和打分都是每张卡一个进程。耗时还没实测：粗估 Stage 1 在 A40 上每个视频几分钟，WorldScore 每个样例也是几分钟（DROID-SLAM 要跑两遍）。冒烟之后用实测值重新估 walltime。
 
@@ -109,6 +109,7 @@ run-submit 2026-11-01-ws-minwm-s1 4 08:00:00 --partition=gpuA40x4-preempt -- \
 | `bench.json` | 最近一次交给 minWM 的条目（只含当时还没生成的） |
 | `eval-shard*.log` | 打分日志，某个样例报错时看这里 |
 | `subset/`、`worldscore_commit.txt` | 抽到的样例、WorldScore 的 commit |
+| `gen_args.txt` | 第一次生成时的推理 config 和覆盖项 |
 
 把视频拉回 Mac 看：
 
