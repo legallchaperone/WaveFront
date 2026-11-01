@@ -63,7 +63,11 @@ git -C "$WS_ROOT" submodule update -q --init thirdparty/Grounded-Segment-Anythin
 
 step "venv and packages"
 [ -x "$P" ] || "$UV" venv -q --python 3.10 "$WS_VENV"
-printf 'torch==2.5.1\ntorchvision==0.20.1\ntorchaudio==2.5.1\nnumpy<2\nsetuptools<70\n' >"$C"
+# WorldScore's README installs pyiqa/transformers unpinned. Today's pyiqa (0.1.16) needs
+# transformers>=5, which dropped GreedySearchDecoderOnlyOutput that mamba_ssm 2.2.4 imports,
+# breaking the metrics package (it imports every metric). Pin pyiqa to the release current
+# when WorldScore came out (0.1.13, Oct 2024; WorldScore Apr 2025): it pins transformers 4.37.2.
+printf 'torch==2.5.1\ntorchvision==0.20.1\ntorchaudio==2.5.1\nnumpy<2\nsetuptools<70\npyiqa==0.1.13\ntransformers<5\n' >"$C"
 cu121=https://download.pytorch.org/whl/cu121
 pip_install torch torchvision torchaudio --index-url $cu121
 pip_install xformers==0.0.28.post3 --index-url $cu121
@@ -74,7 +78,8 @@ pip_install pip setuptools wheel packaging ninja open3d tensorboard scipy opencv
 
 step "DROID-SLAM (the slow part)"
 cd "$WS_ROOT/thirdparty/DROID-SLAM"
-if ! "$P" -c "import droid_backends, lietorch" 2>/dev/null; then
+# Import torch first: compiled extensions link libc10.so, which only torch puts in reach.
+if ! "$P" -c "import torch, droid_backends, lietorch" 2>/dev/null; then
   # Its setup.py hardcodes sm_60..sm_86 (no sm_90); compile for our archs only.
   # Start from the pristine file so a rerun never rewrites an already-rewritten one.
   git checkout -q -- setup.py
@@ -94,7 +99,7 @@ EOF
 fi
 
 step "Grounded-SAM, SAM2, VFIMamba"
-if ! "$P" -c "import segment_anything, groundingdino._C, sam2, causal_conv1d, mamba_ssm" 2>/dev/null; then
+if ! "$P" -c "import torch, segment_anything, groundingdino._C, sam2, causal_conv1d, mamba_ssm" 2>/dev/null; then
   cd "$WS_ROOT/thirdparty/Grounded-Segment-Anything"
   pip_install -e segment_anything
   # --reinstall-package: an earlier install may lack _C, and uv would call it satisfied.
@@ -132,7 +137,7 @@ ls -la "$K"
 
 step "import check"
 cd "$WS_ROOT"
-"$P" -c "import droid_backends, lietorch, groundingdino._C, sam2, mamba_ssm, worldscore"
+"$P" -c "import torch, droid_backends, lietorch, groundingdino._C, sam2, mamba_ssm, worldscore"
 # The metrics package imports every metric (and their CUDA ops) at once.
 "$P" -c "import torch, worldscore.benchmark.metrics; print('WorldScore env ok; GPU visible:', torch.cuda.is_available())"
 
