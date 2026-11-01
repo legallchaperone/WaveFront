@@ -165,6 +165,41 @@ class TestFlowMatchingLoss:
         assert loss.shape == (2,)
 
 
+class TestJointFlowMatchingLoss:
+    def test_terms_are_weighted_separately_and_logged(self):
+        from minwm.engine.events import EventStorage
+        from minwm.engine.training.losses import JointFlowMatchingLoss
+
+        torch.manual_seed(0)
+        pred, target = torch.randn(1, 2, 17, 2, 2), torch.randn(1, 2, 17, 2, 2)
+        batch = {
+            "target": target,
+            "weight": torch.tensor([2.0, 0.5]).reshape(1, 2, 1, 1, 1),
+            "loss_mask": torch.tensor([True, False]).reshape(1, 2, 1, 1, 1),
+        }
+        with EventStorage() as storage:
+            loss = JointFlowMatchingLoss(disp_weight=3.0)(pred, batch, scheduler=None)
+
+        frame0 = 2.0 * (pred - target).pow(2)[:, 0]  # the mask keeps frame 0, weighted 2
+        rgb, disp = frame0[:, :16].mean().item(), frame0[:, 16:].mean().item()
+        assert loss.item() == pytest.approx(rgb + 3.0 * disp, rel=1e-6)
+        assert storage.latest()["loss_rgb"] == pytest.approx(rgb, rel=1e-6)
+        assert storage.latest()["loss_disp"] == pytest.approx(disp, rel=1e-6)
+
+    def test_rejects_prediction_without_disparity_channel(self):
+        from minwm.engine.training.losses import JointFlowMatchingLoss
+
+        pred = torch.zeros(1, 2, 16, 2, 2)
+        with pytest.raises(ValueError, match="1 disparity"):
+            JointFlowMatchingLoss()(pred, {"target": pred}, scheduler=None)
+
+    def test_config_can_name_it(self):
+        from minwm.config import locate
+        from minwm.engine.training.losses import JointFlowMatchingLoss
+
+        assert locate("JointFlowMatchingLoss") is JointFlowMatchingLoss
+
+
 class TestFlowNoiseSeeding:
     """Seed behaviour of the flow preprocessor.
 
