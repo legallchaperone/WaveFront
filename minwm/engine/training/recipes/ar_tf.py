@@ -3,7 +3,9 @@
 from typing import Any
 
 import torch
-from torch import nn
+from torch import Tensor, nn
+
+from minwm.processors import DisparityChannel
 
 from ..losses import mse_loss
 from ._flow_base import SingleForwardFlowRecipe
@@ -16,6 +18,8 @@ class ARTFRecipe(SingleForwardFlowRecipe):
     Each clip is noised to every ``val_sigmas`` level with noise seeded by
     ``val_seed`` plus the clip's index, so the numbers are comparable across steps
     and runs. Every frame gets the same level, and the forward is the training one.
+    With a :class:`~minwm.processors.DisparityChannel` in the chain, the disparity
+    channel is scored separately (velocity MSE, and the x0 error in ``d`` units).
 
     Args:
         val_sigmas (tuple[float, ...]): noise levels σ in ``(0, 1]`` to validate at.
@@ -39,7 +43,7 @@ class ARTFRecipe(SingleForwardFlowRecipe):
         self.val_seed = val_seed
 
     def validation_step(self, model: nn.Module, batch: dict, index: int) -> dict[str, float]:
-        """Unweighted velocity MSE at each ``val_sigmas`` level, plus their mean.
+        """Unweighted validation errors at each ``val_sigmas`` level, plus their means.
 
         Args:
             model (nn.Module): the model under evaluation.
@@ -47,7 +51,10 @@ class ARTFRecipe(SingleForwardFlowRecipe):
             index (int): the sample's index in the val dataset; seeds its noise.
 
         Returns:
-            dict[str, float]: ``val/loss@<σ>`` for each level and ``val/loss``, their mean.
+            dict[str, float]: ``val/loss_rgb@<σ>``, the velocity MSE on the latent
+            channels; with disparity also ``val/loss_disp@<σ>`` (its velocity MSE) and
+            ``val/disp_err@<σ>`` (mean ``|d̂ − d|`` of the x0 estimate, ``d`` in
+            ``[0, 1]``). Each metric's mean over the levels is logged without ``@<σ>``.
         """
         device = next(model.parameters()).device
         batch_size, num_frames = batch["clean_latent"].shape[:2]
@@ -66,7 +73,28 @@ class ARTFRecipe(SingleForwardFlowRecipe):
             shared = {k: noised[k] for k in self.SHARED_INPUT_KEYS if noised.get(k) is not None}
             with self.autocast():
                 pred = self.adapter.denoise(model, **shared, **cond)
-            loss = mse_loss(pred, noised["target"], mask=noised.get("loss_mask"))
-            metrics[f"val/loss@{sigma:g}"] = loss.item()
-        metrics["val/loss"] = sum(metrics.values()) / len(self.val_sigmas)
+            for name, value in self._val_errors(pred, noised).items():
+                metrics[f"{name}@{sigma:g}"] = value
+        for name in {key.split("@")[0] for key in metrics}:
+            values = [v for k, v in metrics.items() if k.startswith(f"{name}@")]
+            metrics[name] = sum(values) / len(values)
         return metrics
+
+    def _val_errors(self, pred: Tensor, noised: dict) -> dict[str, float]:
+        target, mask = noised["target"], noised.get("loss_mask")
+        disparity = next(
+            (p for p in self.batch_preprocessors if isinstance(p, DisparityChannel)), None
+        )
+        c = target.shape[2] - 1 if disparity is not None else target.shape[2]
+        errors = {"val/loss_rgb": mse_loss(pred[:, :, :c], target[:, :, :c], mask=mask).item()}
+        if disparity is None:
+            return errors
+        errors["val/loss_disp"] = mse_loss(pred[:, :, c:], target[:, :, c:], mask=mask).item()
+        x0 = self.scheduler.predict_x0(noised["noisy"].float(), pred.float(), noised["timestep"])
+        # The channel holds scale·(2d − 1), so dividing by 2·scale gives the error in d.
+        err = (x0[:, :, c:] - noised["clean_latent"][:, :, c:].float()).abs()
+        err = err / (2 * disparity.scale)
+        if mask is not None:
+            err = err[torch.broadcast_to(mask.bool(), err.shape)]
+        errors["val/disp_err"] = err.mean().item()
+        return errors

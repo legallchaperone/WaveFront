@@ -112,18 +112,18 @@ class _Identity(torch.nn.Module):
 
 
 class TestARTFValidation:
-    def _recipe(self, **kw):
+    def _recipe(self, disparity_scale=None, **kw):
         from minwm.engine.training.losses import FlowMatchingLoss
         from minwm.engine.training.recipes.ar_tf import ARTFRecipe
 
+        chain = [
+            dict(type="FlowNoise", uniform_across_frames=False, num_frame_per_block=2),
+            dict(type="CleanContextNoiseAug", max_timestep=0),
+        ]
+        if disparity_scale is not None:
+            chain.insert(0, dict(type="DisparityChannel", scale=disparity_scale))
         return ARTFRecipe(
-            loss=FlowMatchingLoss(),
-            adapter=_IdentityAdapter(),
-            batch_preprocessors=[
-                dict(type="FlowNoise", uniform_across_frames=False, num_frame_per_block=2),
-                dict(type="CleanContextNoiseAug", max_timestep=0),
-            ],
-            **kw,
+            loss=FlowMatchingLoss(), adapter=_IdentityAdapter(), batch_preprocessors=chain, **kw
         )
 
     def test_fixed_sigmas_and_seeded_noise(self):
@@ -136,14 +136,45 @@ class TestARTFValidation:
         clean = torch.randn(1, 4, 3, 2, 2)
         out = recipe.validation_step(model, {"clean_latent": clean}, index=2)
 
-        assert set(out) == {"val/loss@0.3", "val/loss@0.9", "val/loss"}
+        assert set(out) == {"val/loss_rgb@0.3", "val/loss_rgb@0.9", "val/loss_rgb"}
         assert out == recipe.validation_step(model, {"clean_latent": clean}, index=2)
         assert out != recipe.validation_step(model, {"clean_latent": clean}, index=3)
         noise = torch.randn(clean.shape, generator=torch.Generator().manual_seed(5 + 2))
         sigma = recipe.scheduler.sigma_for(torch.tensor(300.0))
         expected = mse_loss((1 - sigma) * clean + sigma * noise, noise - clean).item()
-        assert out["val/loss@0.3"] == pytest.approx(expected)
-        assert out["val/loss"] == pytest.approx((out["val/loss@0.3"] + out["val/loss@0.9"]) / 2)
+        assert out["val/loss_rgb@0.3"] == pytest.approx(expected)
+        assert out["val/loss_rgb"] == pytest.approx(
+            (out["val/loss_rgb@0.3"] + out["val/loss_rgb@0.9"]) / 2
+        )
+
+    def test_disparity_is_scored_separately(self):
+        """With DisparityChannel: latents and disparity split, plus the x0 error in d units."""
+        import pytest
+
+        from minwm.engine.training.losses import mse_loss
+
+        recipe = self._recipe(disparity_scale=2.0, val_sigmas=(0.5,), val_seed=0)
+        clean = torch.randn(1, 4, 3, 2, 2)
+        disparity = torch.rand(1, 4, 1, 2, 2)
+        out = recipe.validation_step(
+            _Identity(), {"clean_latent": clean, "disparity": disparity}, index=0
+        )
+
+        names = ("val/loss_rgb", "val/loss_disp", "val/disp_err")
+        assert set(out) == {f"{n}@0.5" for n in names} | set(names)
+        full = torch.cat([clean, 2.0 * (2 * disparity - 1)], dim=2)
+        noise = torch.randn(full.shape, generator=torch.Generator().manual_seed(0))
+        sigma = recipe.scheduler.sigma_for(torch.tensor(500.0))
+        noisy = (1 - sigma) * full + sigma * noise  # the identity model predicts `noisy`
+        target = noise - full
+        assert out["val/loss_rgb@0.5"] == pytest.approx(
+            mse_loss(noisy[:, :, :3], target[:, :, :3]).item()
+        )
+        assert out["val/loss_disp@0.5"] == pytest.approx(
+            mse_loss(noisy[:, :, 3:], target[:, :, 3:]).item()
+        )
+        d_hat = ((noisy - sigma * noisy)[:, :, 3:] / 2.0 + 1) / 2  # x0 = x_t - σ·v, unscaled
+        assert out["val/disp_err@0.5"] == pytest.approx((d_hat - disparity).abs().mean().item())
 
     def test_rejects_sigma_outside_unit_interval(self):
         import pytest
