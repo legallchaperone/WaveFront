@@ -66,6 +66,10 @@ if [ "$(cuda_release)" != 12 ] && type module >/dev/null 2>&1; then
   module load cuda/12.9
 fi
 echo "CUDA_HOME=$CUDA_HOME (CUDA $(cuda_release))"
+# Delta's PrgEnv sets CC=cc / CXX=CC, Cray wrappers that add -I.../math_libs/include
+# (CUDA 13's cuBLAS headers) even with cudatoolkit unloaded; torch passes $CC to nvcc
+# as -ccbin. Build the extensions with plain GCC instead (14, supported by CUDA 12.9).
+export CC=gcc CXX=g++
 WS_ROOT=$WORK/WorldScore WS_VENV=$WORK/venvs/worldscore UV=uv \
   bash tools/eval/worldscore/install_worldscore.sh
 
