@@ -67,6 +67,10 @@ cd $(printf %q "$repo")
 echo "job \$SLURM_JOB_ID on \$(hostname), commit \$(git rev-parse --short HEAD), \$(date)"
 source $(printf %q "$venv/bin/activate")
 export WORK=$(printf %q "$WORK") OUT_DIR=$(printf %q "$out") TOKENIZERS_PARALLELISM=false
+# The env's editable minwm may point at another checkout (one env, several branches):
+# import this checkout's minwm, and record which one ran.
+export PYTHONPATH=$(printf %q "$repo")\${PYTHONPATH:+:\$PYTHONPATH}
+python -c "import importlib.util as u; print('minwm from', u.find_spec('minwm').origin)"
 # Caches under \$WORK (not \$HOME); setup_delta.sh already fetched every weight there,
 # so never reach for the network mid-job.
 source tools/eval/worldscore/delta_env.sh

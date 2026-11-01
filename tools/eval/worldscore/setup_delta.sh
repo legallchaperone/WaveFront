@@ -1,6 +1,7 @@
 #!/bin/bash
 # One-time setup for the WorldScore benchmark on NCSA Delta, everything under $WORK:
-#   $WORK/venvs/WaveFront     minWM env (submit_delta.sh activates it in the job)
+#   $WORK/venvs/WaveFront     minWM env (submit_delta.sh activates it in the job); may be
+#                             shared with other checkouts, so it is only installed if missing
 #   $WORK/venvs/worldscore    WorldScore env (install_worldscore.sh)
 #   $WORK/WorldScore          WorldScore checkout + metric checkpoints
 #   $WORK/data/WorldScore-Dataset
@@ -8,7 +9,9 @@
 #   $WORK/.cache              uv/pip/HF/torch caches, incl. the weights the metrics fetch
 #                             on first use (delta_env.sh), so jobs need no internet
 #
-# Run it on a login node from the repo root, in the background (about an hour,
+# Run it from a checkout of feature/benchmark that nothing else switches branches in
+# (e.g. $WORK/WaveFront-benchmark; the jobs run that checkout's code), on a login node
+# from the repo root, in the background (about an hour,
 # mostly downloads and compiling DROID-SLAM). Delta caps each user on a login node at
 # 16 cores and 37 GB (62 GB hard, no swap); compiles here use 8 jobs. Compute nodes'
 # internet access is undocumented, so everything a job needs is fetched here:
@@ -32,9 +35,14 @@ export PATH=$WORK/venvs/tools/bin:$PATH
 
 step "minWM env"
 P=$WORK/venvs/WaveFront/bin/python
-[ -x "$P" ] || uv venv -q --python 3.12 "$WORK/venvs/WaveFront"
-uv pip install -q --python "$P" -r requirements/base.txt
-uv pip install -q --python "$P" --no-deps -e .
+# Other checkouts (e.g. training on another branch) may share this env and its editable
+# minwm install, so leave a working env alone. Jobs put their own checkout first on
+# PYTHONPATH (submit_delta.sh), so they run their code whichever checkout this points at.
+if ! "$P" -c "import torch, minwm" 2>/dev/null; then
+  [ -x "$P" ] || uv venv -q --python 3.12 "$WORK/venvs/WaveFront"
+  uv pip install -q --python "$P" -r requirements/base.txt
+  uv pip install -q --python "$P" --no-deps -e .
+fi
 "$P" -c "import torch, minwm; print('minWM env: torch', torch.__version__)"
 
 step "Wan 2.1 base (18 GB) + minWM Stage 1 weights (6 GB)"

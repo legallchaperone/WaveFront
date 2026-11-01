@@ -42,13 +42,14 @@
 
 ```bash
 export WORK=/work/hdd/<项目>/$USER          # 也写进 ~/.bashrc
-git clone -b feature/benchmark https://github.com/legallchaperone/WaveFront.git $WORK/WaveFront
-cd $WORK/WaveFront
+git clone -b feature/benchmark https://github.com/legallchaperone/WaveFront.git $WORK/WaveFront-benchmark
+cd $WORK/WaveFront-benchmark
 nohup bash tools/eval/worldscore/setup_delta.sh > $WORK/setup_worldscore.log 2>&1 &
 ```
 
 - **为什么在登录节点**：NCSA 的说明把装软件和传文件放在登录节点；计算节点能不能上网，文档里没有确切说法。
 - **CUDA**：WorldScore 环境用 torch 2.5.1+cu121，编译扩展要 CUDA 12 的 nvcc。Delta 默认加载的 `cudatoolkit` 是 CUDA 13.2，脚本会把它换成 `module load cuda/12.9`。
+- **评测用单独的 checkout**：`$WORK/WaveFront-benchmark` 只用来跑评测，别在里面切分支（作业运行的就是它的代码）。其他分支（比如训练）可以用别的 checkout，共用 `venvs/WaveFront`：这个环境里 minwm 是可编辑安装，指向第一次装它的 checkout；`setup_delta.sh` 发现环境能用就不再动它，作业则把自己的 checkout 放在 `PYTHONPATH` 最前面，日志第二行会写明用的是哪份 minwm。
 - **之后只需要 `WORK`**：`run.sh` 的 `WS_ROOT`、`WS_DATASET`、`WS_PYTHON` 在设了 `WORK` 时默认指向这套布局。
 - 中途失败就重跑同一条命令，做完的步骤会跳过。WorldScore 环境单独重装用 `install_worldscore.sh`（Colab 也用它）。
 - 没装 flash-attn：minWM 的 attention 在没有它时自动退回 PyTorch 的 SDPA。
@@ -70,7 +71,7 @@ nohup bash tools/eval/worldscore/setup_delta.sh > $WORK/setup_worldscore.log 2>&
 
 ## 运行
 
-在 Delta 的仓库根目录用 `submit_delta.sh` 提交，它生成作业脚本、交给 sbatch，所有输出放进 `$WORK/outputs/WaveFront/<run 名>/`（`summary.md`、样例目录和视频、`slurm-<作业号>.out`、提交的作业脚本 `job-<作业号>.sbatch`）。默认用可抢占的 `gpuA40x4-preempt`（扣费系数 0.25），被抢占会自动重新排队；作业失败或超时就用同一个 run 名重交，每一步都会跳过已经做完的部分。
+在 `$WORK/WaveFront-benchmark` 里用 `submit_delta.sh` 提交，它生成作业脚本、交给 sbatch，所有输出放进 `$WORK/outputs/WaveFront/<run 名>/`（`summary.md`、样例目录和视频、`slurm-<作业号>.out`、提交的作业脚本 `job-<作业号>.sbatch`）。默认用可抢占的 `gpuA40x4-preempt`（扣费系数 0.25），被抢占会自动重新排队；作业失败或超时就用同一个 run 名重交，每一步都会跳过已经做完的部分。
 
 **小 benchmark**：`run_small.sh` 固定那 40 个样例，默认评原版 minWM（Stage 1 权重，50 步 UniPC，CFG 3.0）。耗时估计（未实测）一张 A40 5–8 小时，两张大约减半；默认给 10 小时。
 
