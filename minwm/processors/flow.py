@@ -29,6 +29,10 @@ class FlowNoise(BatchPreprocessor):
     dp_rank`` at dist-init), so they are identical within an SP group and distinct
     across DP groups — see the module docstring.
 
+    Validation pins the draw instead: a ``timestep`` ``[B, F]`` already on the batch
+    is used as-is, and a ``noise_generator`` (CPU ``torch.Generator``) on the batch
+    seeds the noise.
+
     Args:
         uniform_across_frames (bool): if True (bidirectional SFT) all frames in a
             sample share one timestep; if False (AR / diffusion forcing) each
@@ -81,31 +85,13 @@ class FlowNoise(BatchPreprocessor):
 
         clean = batch["clean_latent"]
         B, F = clean.shape[:2]
+        timestep = batch.get("timestep")
         with get_rng_states_tracker().fork():
-            noise = torch.randn(clean.shape, dtype=clean.dtype).to(device)
-            timestep = self.scheduler.sample_timesteps(
-                B,
-                F,
-                device,
-                uniform_across_frames=self.uniform_across_frames,
-                weighting_scheme=self.weighting_scheme,
-                logit_mean=self.logit_mean,
-                logit_std=self.logit_std,
-                mode_scale=self.mode_scale,
-            )
-            if not self.uniform_across_frames and self.num_frame_per_block > 1:
-                suffix_frames = F - self.num_prefix_frames
-                if suffix_frames <= 0 or suffix_frames % self.num_frame_per_block != 0:
-                    raise ValueError(
-                        f"num_frames - num_prefix_frames={suffix_frames} must be "
-                        f"positive and divisible by num_frame_per_block="
-                        f"{self.num_frame_per_block}"
-                    )
-                suffix = timestep[:, self.num_prefix_frames :].reshape(
-                    B, -1, self.num_frame_per_block
-                )
-                suffix = suffix[:, :, :1].expand_as(suffix).reshape(B, suffix_frames)
-                timestep = torch.cat([timestep[:, : self.num_prefix_frames], suffix], dim=1)
+            noise = torch.randn(
+                clean.shape, dtype=clean.dtype, generator=batch.get("noise_generator")
+            ).to(device)
+            if timestep is None:
+                timestep = self._sample_timesteps(B, F, device)
         noisy = self.scheduler.add_noise(
             clean.flatten(0, 1), noise.flatten(0, 1), timestep.flatten(0, 1)
         ).unflatten(0, (B, F))
@@ -123,6 +109,30 @@ class FlowNoise(BatchPreprocessor):
         batch["target"] = self.scheduler.training_target(clean, noise)
         batch["weight"] = weight
         return batch
+
+    def _sample_timesteps(self, B: int, F: int, device: torch.device) -> torch.Tensor:
+        timestep = self.scheduler.sample_timesteps(
+            B,
+            F,
+            device,
+            uniform_across_frames=self.uniform_across_frames,
+            weighting_scheme=self.weighting_scheme,
+            logit_mean=self.logit_mean,
+            logit_std=self.logit_std,
+            mode_scale=self.mode_scale,
+        )
+        if not self.uniform_across_frames and self.num_frame_per_block > 1:
+            suffix_frames = F - self.num_prefix_frames
+            if suffix_frames <= 0 or suffix_frames % self.num_frame_per_block != 0:
+                raise ValueError(
+                    f"num_frames - num_prefix_frames={suffix_frames} must be "
+                    f"positive and divisible by num_frame_per_block="
+                    f"{self.num_frame_per_block}"
+                )
+            suffix = timestep[:, self.num_prefix_frames :].reshape(B, -1, self.num_frame_per_block)
+            suffix = suffix[:, :, :1].expand_as(suffix).reshape(B, suffix_frames)
+            timestep = torch.cat([timestep[:, : self.num_prefix_frames], suffix], dim=1)
+        return timestep
 
 
 class FirstFrameConditioning(BatchPreprocessor):

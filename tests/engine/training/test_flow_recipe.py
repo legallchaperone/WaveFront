@@ -88,3 +88,65 @@ class TestGradNormGuard:
         recipe = self._recipe(max_grad_norm=1.0)  # no skip threshold
         assert recipe.skip_grad_norm is None
         assert self._step_with_grad(recipe, 1e6) is True
+
+
+class _IdentityAdapter:
+    """Adapter stub: the model's output (identity of ``noisy``) is the flow prediction."""
+
+    dtype = torch.float32
+
+    def conditioning(self, batch, batch_size, device):
+        return {}
+
+    def denoise(self, model, *, noisy, timestep, clean=None, aug_t=None, viewmats=None, Ks=None):
+        return model(noisy)
+
+
+class _Identity(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.p = torch.nn.Parameter(torch.zeros(()))
+
+    def forward(self, x):
+        return x
+
+
+class TestARTFValidation:
+    def _recipe(self, **kw):
+        from minwm.engine.training.losses import FlowMatchingLoss
+        from minwm.engine.training.recipes.ar_tf import ARTFRecipe
+
+        return ARTFRecipe(
+            loss=FlowMatchingLoss(),
+            adapter=_IdentityAdapter(),
+            batch_preprocessors=[
+                dict(type="FlowNoise", uniform_across_frames=False, num_frame_per_block=2),
+                dict(type="CleanContextNoiseAug", max_timestep=0),
+            ],
+            **kw,
+        )
+
+    def test_fixed_sigmas_and_seeded_noise(self):
+        import pytest
+
+        from minwm.engine.training.losses import mse_loss
+
+        recipe = self._recipe(val_sigmas=(0.3, 0.9), val_seed=5)
+        model = _Identity()
+        clean = torch.randn(1, 4, 3, 2, 2)
+        out = recipe.validation_step(model, {"clean_latent": clean}, index=2)
+
+        assert set(out) == {"val/loss@0.3", "val/loss@0.9", "val/loss"}
+        assert out == recipe.validation_step(model, {"clean_latent": clean}, index=2)
+        assert out != recipe.validation_step(model, {"clean_latent": clean}, index=3)
+        noise = torch.randn(clean.shape, generator=torch.Generator().manual_seed(5 + 2))
+        sigma = recipe.scheduler.sigma_for(torch.tensor(300.0))
+        expected = mse_loss((1 - sigma) * clean + sigma * noise, noise - clean).item()
+        assert out["val/loss@0.3"] == pytest.approx(expected)
+        assert out["val/loss"] == pytest.approx((out["val/loss@0.3"] + out["val/loss@0.9"]) / 2)
+
+    def test_rejects_sigma_outside_unit_interval(self):
+        import pytest
+
+        with pytest.raises(ValueError, match="val_sigmas"):
+            self._recipe(val_sigmas=(0.0, 0.5))

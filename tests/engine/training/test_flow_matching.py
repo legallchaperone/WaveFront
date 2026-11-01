@@ -236,3 +236,28 @@ class TestFlowNoiseSeeding:
         timestep = out["timestep"]
         assert torch.equal(timestep[:, :4], timestep[:, :1].expand(-1, 4))
         assert torch.equal(timestep[:, 4:], timestep[:, 4:5].expand(-1, 4))
+
+    def test_preset_timestep_and_generator_pin_the_draw(self):
+        """Validation passes a fixed timestep + noise generator; both are honoured."""
+        from minwm.processors.flow import FlowNoise
+
+        clean = torch.randn(1, 8, 4, 2, 2)
+        preset = torch.full((1, 8), 500.0)
+        fn = FlowNoise(
+            uniform_across_frames=False, num_frame_per_block=4, scheduler=self._scheduler()
+        )
+        outs = [
+            fn(
+                {
+                    "clean_latent": clean,
+                    "timestep": preset,
+                    "noise_generator": torch.Generator().manual_seed(3),
+                },
+                torch.device("cpu"),
+            )
+            for _ in range(2)
+        ]
+        expected_noise = torch.randn(clean.shape, generator=torch.Generator().manual_seed(3))
+        assert torch.equal(outs[0]["timestep"], preset)
+        assert torch.equal(outs[0]["noise"], expected_noise)
+        assert torch.equal(outs[1]["noise"], expected_noise)
