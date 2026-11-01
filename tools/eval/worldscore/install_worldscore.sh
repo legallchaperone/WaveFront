@@ -38,9 +38,13 @@ cuda_major=$(nvcc --version | sed -n 's/.*release \([0-9]*\)\..*/\1/p')
 # torch 2.5.1+cu121 builds extensions only with a CUDA 12 nvcc.
 [ "$cuda_major" = 12 ] || die "nvcc at $CUDA_HOME is CUDA $cuda_major, need 12 (Delta: module load cuda/12.9)"
 if [ -z "${TORCH_CUDA_ARCH_LIST:-}" ]; then
-  TORCH_CUDA_ARCH_LIST=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -1 || true)
+  # On a GPU-less node nvidia-smi may exist and print an error to stdout; keep only "X.Y".
+  TORCH_CUDA_ARCH_LIST=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null |
+    grep -E '^[0-9]+\.[0-9]+$' | head -1 || true)
   TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST:-8.0;8.6}
 fi
+arch_re='^[0-9]+\.[0-9]+(\+PTX)?([; ][0-9]+\.[0-9]+(\+PTX)?)*$'
+[[ $TORCH_CUDA_ARCH_LIST =~ $arch_re ]] || die "TORCH_CUDA_ARCH_LIST='$TORCH_CUDA_ARCH_LIST' is not a list like '8.0;8.6'"
 # FORCE_CUDA: GroundingDINO only builds its CUDA op when it sees a GPU, unless forced.
 export TORCH_CUDA_ARCH_LIST MAX_JOBS=${MAX_JOBS:-8} FORCE_CUDA=1 AM_I_DOCKER=False BUILD_WITH_CUDA=True
 step "CUDA $(nvcc --version | sed -n 's/.*release \([0-9.]*\),.*/\1/p') at $CUDA_HOME; archs $TORCH_CUDA_ARCH_LIST"
@@ -70,11 +74,13 @@ step "DROID-SLAM (the slow part)"
 cd "$WS_ROOT/thirdparty/DROID-SLAM"
 if ! "$P" -c "import droid_backends, lietorch" 2>/dev/null; then
   # Its setup.py hardcodes sm_60..sm_86 (no sm_90); compile for our archs only.
+  # Start from the pristine file so a rerun never rewrites an already-rewritten one.
+  git checkout -q -- setup.py
   "$P" - "$TORCH_CUDA_ARCH_LIST" <<'EOF'
 import re
 import sys
 
-archs = [a.strip().replace(".", "") for a in re.split("[;, ]", sys.argv[1]) if a.strip()]
+archs = [major + minor for major, minor in re.findall(r"(\d+)\.(\d+)", sys.argv[1])]
 flags = "".join(f"\n                    '-gencode=arch=compute_{a},code=sm_{a}'," for a in archs)
 src = open("setup.py").read()
 src = re.sub(r"(\s*'-gencode=arch=compute_\d+,code=sm_\d+',?)+", flags, src)
