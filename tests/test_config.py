@@ -212,6 +212,32 @@ def test_merge_deep():
     assert out == {"x": {"a": 1, "b": 9}}
 
 
+def test_merge_delete_replaces_the_inherited_node():
+    base = {"data": {"dataset": {"type": "A", "data_path": "p"}, "batch_size": 2}}
+    override = {"data": {"dataset": {"_delete_": True, "type": "B", "length": 3}}}
+    out = merge(base, override)
+    assert out == {"data": {"dataset": {"type": "B", "length": 3}, "batch_size": 2}}
+    assert override["data"]["dataset"]["_delete_"] is True  # the caller's dict is untouched
+
+
+def test_b2_joint_depth_configs_load_and_parse():
+    stage1 = load("configs/wan21/action2v/train/stage1_ar_tf.py")
+    real = load("configs/wan21/wavefront/train/b2_joint_depth.py")
+    mock = load("configs/wan21/wavefront/train/b2_joint_depth_mock.py")
+    for cfg in (real, mock):
+        MWMConfig.from_dict(cfg)
+        assert cfg["model"]["type"] == "CausalWan21Model" and cfg["model"]["use_disparity"]
+        assert cfg["recipe"]["loss"]["type"] == "JointFlowMatchingLoss"
+        chain = [p["type"] for p in cfg["recipe"]["batch_preprocessors"]]
+        assert chain.index("DisparityChannel") < chain.index("FlowNoise")
+        assert cfg["recipe"]["optimizer"] == stage1["recipe"]["optimizer"]
+        assert cfg["data"]["batch_size"] == stage1["data"]["batch_size"]
+    for key in ("dataset", "val_dataset"):
+        node = mock["data"][key]
+        assert node["type"] == "MockCameraLatentDataset" and node["with_disparity"]
+        assert "data_path" not in node and "_delete_" not in node
+
+
 def test_load_yaml(tmp_path):
     p = tmp_path / "cfg.yaml"
     p.write_text("model:\n  type: fractions:Fraction\n  numerator: 7\n")

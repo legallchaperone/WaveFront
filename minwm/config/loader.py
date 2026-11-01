@@ -8,7 +8,9 @@ arbitrary nested dicts with ``type`` keys programmatically.
 A ``.py`` config may declare ``_base_`` (a path string or list of paths,
 relative to the config's own directory) to inherit from shared base configs;
 bases are deep-merged left-to-right and the leaf config's own keys win
-(detectron2 / mmcv style). Configs without ``_base_`` are returned unchanged.
+(detectron2 / mmcv style); a dict marked ``_delete_=True`` replaces the
+inherited node instead (see :func:`merge`). Configs without ``_base_`` are
+returned unchanged.
 """
 
 import importlib.util
@@ -16,7 +18,7 @@ import os
 import types
 import uuid
 
-from omegaconf import OmegaConf
+from omegaconf import DictConfig, OmegaConf
 
 
 def _load_yaml(path: str) -> dict:
@@ -61,9 +63,28 @@ def load(path: str) -> dict:
 
 
 def merge(*cfgs: dict) -> dict:
-    """Deep-merge config dicts left-to-right (later overrides earlier)."""
-    merged = OmegaConf.merge(*[OmegaConf.create(c) for c in cfgs])
+    """Deep-merge config dicts left-to-right (later overrides earlier).
+
+    A dict node carrying ``_delete_=True`` replaces the node it overrides instead
+    of merging into it (the mmengine convention), e.g. to swap an inherited
+    dataset for one that takes different arguments.
+    """
+    merged = OmegaConf.create({})
+    for cfg in cfgs:
+        cfg = OmegaConf.create(cfg)
+        _drop_replaced(merged, cfg)
+        merged = OmegaConf.merge(merged, cfg)
     return OmegaConf.to_container(merged, resolve=True)  # type: ignore[return-value]
+
+
+def _drop_replaced(base: DictConfig, override: DictConfig) -> None:
+    for key, value in override.items():
+        if not isinstance(value, DictConfig):
+            continue
+        if value.pop("_delete_", False):
+            base.pop(key, None)
+        elif isinstance(base.get(key), DictConfig):
+            _drop_replaced(base[key], value)
 
 
 def apply_overrides(cfg: dict, overrides: list[str]) -> dict:
