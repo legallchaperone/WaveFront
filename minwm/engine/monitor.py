@@ -61,32 +61,50 @@ class TensorBoardWriter(BaseWriter):
 class WandBWriter(BaseWriter):
     """Fan metrics out to Weights & Biases.
 
+    The run id is saved to ``<log_dir>/wandb_run_id.txt``. A resumed training run
+    reads it back and keeps logging to the same W&B run; a fresh run starts a new
+    W&B run and overwrites the file.
+
     Args:
-        log_dir (str): directory used as the W&B run dir.
-        project (str | None): project name; falls back to ``WANDB_PROJECT`` then
-            ``"minwm"``.
-        run_name (str | None): run name; falls back to ``WANDB_RUN_NAME``.
+        cfg (Monitor): W&B knobs. ``wandb_project`` falls back to ``WANDB_PROJECT``
+            then ``"minwm"``; ``wandb_run_name`` falls back to ``WANDB_RUN_NAME``.
+        log_dir (str): directory used as the W&B run dir and for the run-id file.
         config (dict | None): run hyperparameters, stored as the W&B run config.
+        resume (bool): continue the W&B run recorded in ``log_dir``, if any.
     """
+
+    RUN_ID_FILE = "wandb_run_id.txt"
 
     def __init__(
         self,
+        cfg: Monitor,
         log_dir: str,
-        project: str | None,
-        run_name: str | None,
         config: dict | None = None,
+        resume: bool = False,
     ) -> None:
         import wandb
 
         self._wandb = wandb
         os.makedirs(log_dir, exist_ok=True)
-        wandb.init(
-            project=project or os.getenv("WANDB_PROJECT", "minwm"),
-            name=run_name or os.getenv("WANDB_RUN_NAME"),
+        id_path = os.path.join(log_dir, self.RUN_ID_FILE)
+        run_id = None
+        if resume and os.path.exists(id_path):
+            with open(id_path) as f:
+                run_id = f.read().strip() or None
+        run = wandb.init(
+            project=cfg.wandb_project or os.getenv("WANDB_PROJECT", "minwm"),
+            name=cfg.wandb_run_name or os.getenv("WANDB_RUN_NAME"),
+            group=cfg.wandb_group,
+            tags=list(cfg.wandb_tags) or None,
+            notes=cfg.wandb_notes,
             dir=log_dir,
             config=config,
+            id=run_id,
+            resume="allow" if run_id else None,
         )
-        logger.info("WandB logging enabled")
+        with open(id_path, "w") as f:
+            f.write(run.id)
+        logger.info("WandB logging enabled (run id %s%s)", run.id, ", resumed" if run_id else "")
 
     def log(self, metrics: dict[str, float], step: int) -> None:
         self._wandb.log(metrics, step=step)
@@ -111,13 +129,16 @@ class WriterList(BaseWriter):
             writer.close()
 
 
-def _build_writers(cfg: Monitor, log_dir: str, run_config: dict | None = None) -> WriterList:
+def _build_writers(
+    cfg: Monitor, log_dir: str, run_config: dict | None = None, resume: bool = False
+) -> WriterList:
     """Construct the configured backend writers (main process only).
 
     Args:
         cfg (Monitor): the monitor config naming the backends.
         log_dir (str): base directory for backend output.
         run_config (dict | None): run hyperparameters for backends that store them.
+        resume (bool): continue the previous backend run (W&B) recorded in ``log_dir``.
 
     Returns:
         WriterList: the fan-out container (empty when no backends configured).
@@ -127,9 +148,7 @@ def _build_writers(cfg: Monitor, log_dir: str, run_config: dict | None = None) -
         if backend == "tensorboard":
             writers.append(TensorBoardWriter(log_dir))
         elif backend == "wandb":
-            writers.append(
-                WandBWriter(log_dir, cfg.wandb_project, cfg.wandb_run_name, config=run_config)
-            )
+            writers.append(WandBWriter(cfg, log_dir, config=run_config, resume=resume))
         else:
             raise ValueError(f"unknown monitor backend {backend!r}; valid: tensorboard, wandb")
     return WriterList(writers)
@@ -174,12 +193,21 @@ class MetricsProcessor:
         log_dir (str): base directory for backend output.
         run_config (dict | None): run hyperparameters handed to backends that store
             them (W&B run config).
+        resume (bool): the trainer is resuming from a checkpoint, so backends
+            continue their previous run instead of starting a new one.
     """
 
-    def __init__(self, cfg: Monitor, log_dir: str, run_config: dict | None = None) -> None:
+    def __init__(
+        self,
+        cfg: Monitor,
+        log_dir: str,
+        run_config: dict | None = None,
+        resume: bool = False,
+    ) -> None:
         self._cfg = cfg
         self._log_dir = log_dir
         self._run_config = run_config
+        self._resume = resume
         self._writers: WriterList | None = None
         self._mem = DeviceMemoryMonitor() if torch.cuda.is_available() else None
         self._t_last = time.perf_counter()
@@ -207,7 +235,7 @@ class MetricsProcessor:
         if not comm.is_main_process():
             return
         if self._writers is None:
-            self._writers = _build_writers(self._cfg, self._log_dir, self._run_config)
+            self._writers = _build_writers(self._cfg, self._log_dir, self._run_config, self._resume)
 
         now = time.perf_counter()
         dt = now - self._t_last

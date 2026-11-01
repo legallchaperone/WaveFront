@@ -253,31 +253,45 @@ def test_metrics_processor_throughput_no_memory_on_cpu():
         assert not any(k.startswith("memory/") for k in merged)
 
 
-def test_wandb_run_config_records_hyperparams(fake_module, tmp_path, monkeypatch):
+class _OneBatchTrainer(BaseTrainer):
+    def build_dataloader(self, data_cfg):
+        return [torch.randn(2, 4)]
+
+
+def _train_with_fake_wandb(cfg, monkeypatch, new_run_id="run0"):
+    """Build and train under a fake ``wandb``; return the ``wandb.init`` kwargs."""
     init_kwargs = {}
+
+    def init(**kw):
+        init_kwargs.update(kw)
+        return types.SimpleNamespace(id=kw["id"] or new_run_id)
+
     fake_wandb = types.ModuleType("wandb")
     fake_wandb.run = None
-    fake_wandb.init = lambda **kw: init_kwargs.update(kw)
+    fake_wandb.init = init
     fake_wandb.log = lambda metrics, step: None
-    monkeypatch.setenv("SLURM_JOB_ID", "123")
-    cfg = {
-        "model": {"type": "minwm_test_fakes:TinyModel", "dim": 4},
-        "recipe": {"type": "minwm_test_fakes:TinyRecipe"},
-        "training": {"max_steps": 1, "log_interval": 1, "output_dir": str(tmp_path)},
-        "data": {"batch_size": 2},
-        "monitor": {"backends": ["wandb"]},
-    }
-
-    class T(BaseTrainer):
-        def build_dataloader(self, data_cfg):
-            return [torch.randn(2, 4)]
-
-    t = T(cfg)
+    t = _OneBatchTrainer(cfg)
     # Install the fake only after the build: diffusers' import probes
     # find_spec("wandb"), which rejects a module without a __spec__.
     monkeypatch.setitem(sys.modules, "wandb", fake_wandb)
     t.train()
     t.close()
+    return init_kwargs
+
+
+def _wandb_cfg(out, **monitor):
+    return {
+        "model": {"type": "minwm_test_fakes:TinyModel", "dim": 4},
+        "recipe": {"type": "minwm_test_fakes:TinyRecipe"},
+        "training": {"max_steps": 1, "log_interval": 1, "ckpt_interval": 1, "output_dir": out},
+        "data": {"batch_size": 2},
+        "monitor": {"backends": ["wandb"], **monitor},
+    }
+
+
+def test_wandb_run_config_records_hyperparams(fake_module, tmp_path, monkeypatch):
+    monkeypatch.setenv("SLURM_JOB_ID", "123")
+    init_kwargs = _train_with_fake_wandb(_wandb_cfg(str(tmp_path)), monkeypatch)
 
     config = init_kwargs["config"]
     assert config["model"]["dim"] == 4
@@ -285,6 +299,22 @@ def test_wandb_run_config_records_hyperparams(fake_module, tmp_path, monkeypatch
     assert config["runtime"]["world_size"] == 1
     assert config["runtime"]["global_batch_size"] == 2
     assert config["runtime"]["slurm_job_id"] == "123"
+
+
+def test_wandb_resume_continues_the_same_run(fake_module, tmp_path, monkeypatch):
+    cfg = _wandb_cfg(str(tmp_path), wandb_group="phase0", wandb_tags=["b2"], wandb_notes="smoke")
+    first = _train_with_fake_wandb(cfg, monkeypatch, new_run_id="abc")
+    assert first["id"] is None and first["resume"] is None
+    assert (first["group"], first["tags"], first["notes"]) == ("phase0", ["b2"], "smoke")
+
+    cfg["training"]["max_steps"] = 2
+    cfg["checkpoint"] = {"resume": True}
+    resumed = _train_with_fake_wandb(cfg, monkeypatch, new_run_id="other")
+    assert resumed["id"] == "abc" and resumed["resume"] == "allow"
+
+    cfg["checkpoint"] = {"resume": False}
+    fresh = _train_with_fake_wandb(cfg, monkeypatch, new_run_id="other")
+    assert fresh["id"] is None
 
 
 # ---- checkpoint roundtrip ------------------------------------------------

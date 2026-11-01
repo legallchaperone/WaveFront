@@ -170,7 +170,10 @@ class BaseTrainer:
         self.storage = EventStorage(self.step)
         run_dir = local_run_dir(self.cfg.training.output_dir)
         self.metrics_processor = MetricsProcessor(
-            self.cfg.monitor, run_dir or "", run_config=self._run_config()
+            self.cfg.monitor,
+            run_dir or "",
+            run_config=self._run_config(),
+            resume=self.cfg.checkpoint.resume,
         )
 
     def _run_config(self) -> dict[str, Any]:

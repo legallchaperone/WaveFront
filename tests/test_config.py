@@ -539,6 +539,11 @@ def test_monitor_backends_list_coerces_to_tuple():
     assert cfg.monitor.backends == ("tensorboard",)
 
 
+def test_monitor_wandb_tags_list_coerces_to_tuple():
+    cfg = MWMConfig.from_dict({"monitor": {"wandb_tags": ["b2", "a1"]}})
+    assert cfg.monitor.wandb_tags == ("b2", "a1")
+
+
 def test_monitor_strict_rejects_typo():
     with pytest.raises(ValueError, match="backend"):
         MWMConfig.from_dict({"monitor": {"backend": ["wandb"]}})

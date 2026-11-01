@@ -234,11 +234,18 @@ class Monitor:
     """WandB project name (else the ``WANDB_PROJECT`` env var, else ``"minwm"``)."""
     wandb_run_name: str | None = None
     """WandB run name (else the ``WANDB_RUN_NAME`` env var)."""
+    wandb_group: str | None = None
+    """WandB group (e.g. the experiment phase); runs in one group are shown together."""
+    wandb_tags: tuple[str, ...] = ()
+    """WandB tags for filtering runs (baseline id, key hyperparameters, data subset)."""
+    wandb_notes: str | None = None
+    """One line on what the run tests, shown on its W&B page."""
 
     def __post_init__(self) -> None:
-        # YAML / py configs spell a list (``["tensorboard"]``); freeze it to a tuple.
-        if not isinstance(self.backends, tuple):
-            object.__setattr__(self, "backends", tuple(self.backends))
+        # YAML / py configs spell lists (``["tensorboard"]``); freeze them to tuples.
+        for name in ("backends", "wandb_tags"):
+            if not isinstance(getattr(self, name), tuple):
+                object.__setattr__(self, name, tuple(getattr(self, name)))
 
 
 @dataclass(frozen=True)
