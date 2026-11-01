@@ -133,9 +133,14 @@ class _TinyCachedCausal(torch.nn.Module):
         self.blocks = torch.nn.ModuleList([torch.nn.Identity()])
 
 
-def _build_pipeline(use_prope: bool = False, num_frame_per_block: int = 1):
+def _build_pipeline(
+    use_prope: bool = False, num_frame_per_block: int = 1, use_disparity: bool = False
+):
     gen = CausalWan21Model(
-        **_ARCH, use_prope=use_prope, num_frame_per_block=num_frame_per_block
+        **_ARCH,
+        use_prope=use_prope,
+        num_frame_per_block=num_frame_per_block,
+        use_disparity=use_disparity,
     ).eval()
     scheduler = FlowMatchingScheduler(num_train_timesteps=1000, shift=5.0)
     adapter = Wan21Adapter(
@@ -507,3 +512,19 @@ class TestPipelineForward:
         noise = torch.randn(1, 4, 16, 8, 8)
         video = pipe.generate({"noise": noise, "prompts": ["blocked"]})["video"]
         assert torch.isfinite(video).all()
+
+    def test_disparity_is_split_off_before_decoding(self):
+        class _SixteenChannelVAE(_StubVAE):
+            """Like the real Wan VAE: any channel count but 16 fails to decode."""
+
+            def decode(self, zs):
+                assert all(z.shape[0] == 16 for z in zs), [z.shape[0] for z in zs]
+                return super().decode(zs)
+
+        torch.manual_seed(0)
+        pipe = _build_pipeline(use_disparity=True)
+        pipe.vae = _SixteenChannelVAE()
+        out = pipe.generate({"noise": torch.randn(1, 3, 17, 8, 8), "prompts": ["depth"]})
+        assert out["latents"].shape == (1, 3, 16, 8, 8)
+        assert out["disparity"].shape == (1, 3, 1, 8, 8)
+        assert torch.isfinite(out["video"]).all()

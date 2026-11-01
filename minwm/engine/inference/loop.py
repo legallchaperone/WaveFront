@@ -232,6 +232,10 @@ class ARGenerationLoop:
         Expected keys: ``noise`` ``[B,F,C,H,W]``, the family's conditioning
         (Wan ``prompts`` or the HY pre-encoded stream), and optional ``viewmats``
         / ``Ks`` / ``action``.
+
+        Returns ``latents`` (and ``video`` with a VAE). For a ``use_disparity``
+        generator the last channel is split off as ``disparity`` ``[B,F,1,H,W]``, in
+        the model's ``a·(2d − 1)`` units, so only the latents reach the VAE.
         """
 
         noise: Tensor = batch["noise"]
@@ -384,6 +388,8 @@ class ARGenerationLoop:
         branches = None
 
         out: dict = {"latents": output}
+        if getattr(self.generator, "use_disparity", False):
+            out = {"latents": output[:, :, :-1], "disparity": output[:, :, -1:]}
         if self.vae is not None:
             # HY's VAE decode runs a temporal conv3d over the full window and only
             # tiles spatially, so a busy card can OOM with the generator resident.
@@ -393,7 +399,7 @@ class ARGenerationLoop:
             if offload:
                 self.generator.to("cpu")
                 torch.cuda.empty_cache()
-            video = self.adapter.decode_latents(self.vae, output)
+            video = self.adapter.decode_latents(self.vae, out["latents"])
             if offload:
                 self.generator.to(device)
             out["video"] = (video * 0.5 + 0.5).clamp(0, 1)
