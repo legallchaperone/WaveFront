@@ -41,13 +41,18 @@ class CausalHead(nn.Module):
         out_dim (int): output channel dimension.
         patch_size (tuple): 3-D patch size ``(T, H, W)``.
         eps (float): LayerNorm epsilon.
+        disp_dim (int): extra output channels predicted by ``disp_head`` from the same
+            modulated features (``0`` = no disparity output).
     """
 
-    def __init__(self, dim: int, out_dim: int, patch_size: tuple, eps: float = 1e-6):
+    def __init__(
+        self, dim: int, out_dim: int, patch_size: tuple, eps: float = 1e-6, disp_dim: int = 0
+    ):
         super().__init__()
         self.patch_size = patch_size
         self.norm = WanLayerNorm(dim, eps)
         self.head = nn.Linear(dim, math.prod(patch_size) * out_dim)
+        self.disp_head = nn.Linear(dim, math.prod(patch_size) * disp_dim) if disp_dim else None
         self.modulation = nn.Parameter(torch.randn(1, 2, dim) / dim**0.5)
 
     def forward(self, x: torch.Tensor, e: torch.Tensor) -> torch.Tensor:
@@ -55,12 +60,25 @@ class CausalHead(nn.Module):
             x (Tensor): token features, shape ``[B, L, dim]``.
             e (Tensor): AdaLN conditioning, shape ``[B, F, 1, dim]``.
         Returns:
-            Tensor: projected patches, shape ``[B, L, prod(patch_size)*out_dim]``.
+            Tensor: projected patches, shape ``[B, L, prod(patch_size)*(out_dim+disp_dim)]``,
+            channels innermost per patch position, so ``unpatchify`` reads the
+            disparity output as trailing channels.
         """
         num_frames, frame_seqlen = e.shape[1], x.shape[1] // e.shape[1]
         e = (self.modulation.unsqueeze(1) + e).chunk(2, dim=2)
         x = self.norm(x).unflatten(1, (num_frames, frame_seqlen)) * (1 + e[1]) + e[0]
-        return self.head(x.flatten(1, 2))
+        x = x.flatten(1, 2)
+        if self.disp_head is None:
+            return self.head(x)
+        patch = math.prod(self.patch_size)
+        out = torch.cat(
+            [
+                self.head(x).unflatten(-1, (patch, -1)),
+                self.disp_head(x).unflatten(-1, (patch, -1)),
+            ],
+            dim=-1,
+        )
+        return out.flatten(-2)
 
 
 class CausalWan21Model(ModelMixin, ConfigMixin):
@@ -88,6 +106,14 @@ class CausalWan21Model(ModelMixin, ConfigMixin):
             ``from_pretrained`` round-trips the camera params.
         num_frame_per_block (int): latent frames grouped into one causal attention
             chunk (the AR block size). ``1`` = pure frame-causal; stage 1 sets ``4``.
+        use_disparity (bool): denoise a disparity map jointly with the latents. Inputs
+            carry it as one channel after the ``in_dim`` latent channels (embedded by
+            ``disp_embed``); outputs carry it after the ``out_dim`` channels (from
+            ``head.disp_head``). Both are zero-init, so a checkpoint without them
+            behaves exactly as before. t2v only.
+
+    Raises:
+        ValueError: if ``use_disparity`` is set for an ``i2v`` model.
     """
 
     ignore_for_config = ["patch_size", "cross_attn_norm", "qk_norm", "text_dim"]
@@ -116,9 +142,12 @@ class CausalWan21Model(ModelMixin, ConfigMixin):
         eps: float = 1e-6,
         use_prope: bool = False,
         num_frame_per_block: int = 1,
+        use_disparity: bool = False,
     ):
         super().__init__()
         assert model_type in ("t2v", "i2v")
+        if use_disparity and model_type != "t2v":
+            raise ValueError("use_disparity supports model_type='t2v' only")
         self.model_type = model_type
         self.patch_size = patch_size
         self.text_len = text_len
@@ -135,8 +164,12 @@ class CausalWan21Model(ModelMixin, ConfigMixin):
         self.cross_attn_norm = cross_attn_norm
         self.eps = eps
         self.use_prope = use_prope
+        self.use_disparity = use_disparity
 
         self.patch_embedding = nn.Conv3d(in_dim, dim, kernel_size=patch_size, stride=patch_size)
+        self.disp_embed = (
+            nn.Conv3d(1, dim, kernel_size=patch_size, stride=patch_size) if use_disparity else None
+        )
         self.text_embedding = nn.Sequential(
             nn.Linear(text_dim, dim), nn.GELU(approximate="tanh"), nn.Linear(dim, dim)
         )
@@ -163,7 +196,7 @@ class CausalWan21Model(ModelMixin, ConfigMixin):
                 for _ in range(num_layers)
             ]
         )
-        self.head = CausalHead(dim, out_dim, patch_size, eps)
+        self.head = CausalHead(dim, out_dim, patch_size, eps, disp_dim=1 if use_disparity else 0)
 
         assert (dim % num_heads) == 0 and (dim // num_heads) % 2 == 0
         d = dim // num_heads
@@ -435,7 +468,7 @@ class CausalWan21Model(ModelMixin, ConfigMixin):
         if y is not None:
             x = [torch.cat([u, v], dim=0) for u, v in zip(x, y)]
 
-        x = [self.patch_embedding(u.unsqueeze(0)) for u in x]
+        x = [self._patch_embed(u.unsqueeze(0)) for u in x]
         grid_sizes = torch.stack([torch.tensor(u.shape[2:], dtype=torch.long) for u in x])
         x = [u.flatten(2).transpose(1, 2) for u in x]
         seq_lens = torch.tensor([u.size(1) for u in x], dtype=torch.long)
@@ -601,7 +634,7 @@ class CausalWan21Model(ModelMixin, ConfigMixin):
         if y is not None:
             x = [torch.cat([u, v], dim=0) for u, v in zip(x, y)]
 
-        x = [self.patch_embedding(u.unsqueeze(0)) for u in x]
+        x = [self._patch_embed(u.unsqueeze(0)) for u in x]
         grid_sizes = torch.stack([torch.tensor(u.shape[2:], dtype=torch.long) for u in x])
         x = [u.flatten(2).transpose(1, 2) for u in x]
         seq_lens = torch.tensor([u.size(1) for u in x], dtype=torch.long)
@@ -624,7 +657,7 @@ class CausalWan21Model(ModelMixin, ConfigMixin):
             context = torch.cat([self.img_emb(clip_fea), context], dim=1)
 
         if clean_x is not None:
-            clean_x = [self.patch_embedding(u.unsqueeze(0)) for u in clean_x]
+            clean_x = [self._patch_embed(u.unsqueeze(0)) for u in clean_x]
             clean_x = [u.flatten(2).transpose(1, 2) for u in clean_x]
             seq_lens_clean = torch.tensor([u.size(1) for u in clean_x], dtype=torch.long)
             assert seq_lens_clean.max() <= seq_len
@@ -766,17 +799,39 @@ class CausalWan21Model(ModelMixin, ConfigMixin):
             return self._forward_inference(*args, **kwargs)
         return self._forward_train(*args, **kwargs)
 
+    def zero_init_param_names(self) -> list[str]:
+        """Zero-init parameters a checkpoint may lack; weight loading fills them with zeros.
+
+        That lets a Stage 1 checkpoint (no disparity branch) load strictly into a
+        ``use_disparity`` model while any other missing key still fails.
+        """
+        if self.disp_embed is None:
+            return []
+        return [
+            "disp_embed.weight",
+            "disp_embed.bias",
+            "head.disp_head.weight",
+            "head.disp_head.bias",
+        ]
+
+    def _patch_embed(self, x: torch.Tensor) -> torch.Tensor:
+        """Patch-embed ``[1, C, F, H, W]``; with ``use_disparity`` the last channel is disparity."""
+        if self.disp_embed is None:
+            return self.patch_embedding(x)
+        return self.patch_embedding(x[:, : self.in_dim]) + self.disp_embed(x[:, self.in_dim :])
+
     def unpatchify(self, x: torch.Tensor, grid_sizes: torch.Tensor) -> list[torch.Tensor]:
         """Reconstruct video tensors from patch token sequence.
 
         Args:
-            x (Tensor): patch tokens, shape ``[B, L, C_out * prod(patch_size)]``.
+            x (Tensor): patch tokens, shape ``[B, L, C_out * prod(patch_size)]``; ``C_out``
+                is ``out_dim``, plus one with ``use_disparity``.
             grid_sizes (Tensor): ``(F, H, W)`` per sample, shape ``[B, 3]``.
 
         Returns:
             list[Tensor]: reconstructed videos, each ``[C_out, F*pt, H*ph, W*pw]``.
         """
-        c = self.out_dim
+        c = x.shape[-1] // math.prod(self.patch_size)
         out = []
         for u, v in zip(x, grid_sizes.tolist()):
             u = u[: math.prod(v)].view(*v, *self.patch_size, c)
@@ -807,3 +862,9 @@ class CausalWan21Model(ModelMixin, ConfigMixin):
             if getattr(block.self_attn, "use_prope", False):
                 nn.init.zeros_(block.self_attn.prope_o.weight)
                 nn.init.zeros_(block.self_attn.prope_o.bias)
+        # Same for the disparity branch: zero in and out, so a checkpoint without it
+        # (base or Stage 1) predicts the latents exactly as before.
+        if self.disp_embed is not None:
+            for m in (self.disp_embed, self.head.disp_head):
+                nn.init.zeros_(m.weight)
+                nn.init.zeros_(m.bias)

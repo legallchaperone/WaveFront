@@ -363,6 +363,20 @@ class Checkpointer:
         return dcp_reader(path, self.storage)
 
 
+def _fill_zero_init_params(module: Any, weights: dict[str, Any]) -> None:
+    names = getattr(module, "zero_init_param_names", None)
+    if names is None:
+        return
+    import torch
+
+    params = dict(module.named_parameters())
+    filled = [name for name in names() if name not in weights]
+    for name in filled:
+        weights[name] = torch.zeros(params[name].shape, dtype=params[name].dtype)
+    if filled:
+        logger.info("checkpoint lacks zero-init params %s; loading them as zeros", filled)
+
+
 def load_model_weights(
     module: Any,
     path: str,
@@ -380,7 +394,10 @@ def load_model_weights(
     ``auxiliary_pretrained``) and inference. Reads and normalizes weights via
     :func:`~minwm.engine.checkpoint.formats.read_model_state`, then loads them: under
     ``sharded`` a full state dict is broadcast from rank 0 and redistributed into
-    the sharded module; otherwise a plain ``load_state_dict``.
+    the sharded module; otherwise a plain ``load_state_dict``. Parameters the module
+    lists in ``zero_init_param_names()`` and the checkpoint lacks are loaded as
+    zeros, so a checkpoint from before a zero-init branch existed still loads
+    strictly; every other missing or unexpected key fails as usual.
 
     Args:
         module (nn.Module): destination module (primary model or an auxiliary).
@@ -395,6 +412,7 @@ def load_model_weights(
     """
     storage = storage or Storage()
     weights = formats.read_model_state(path, storage, select=select, key=key, prefer_ema=prefer_ema)
+    _fill_zero_init_params(module, weights)
     if sharded:
         from torch.distributed.checkpoint.state_dict import (
             StateDictOptions,
