@@ -14,6 +14,7 @@ from minwm.engine import events as events_mod
 from minwm.engine.events import EventStorage, get_event_storage, record_time
 from minwm.engine.monitor import BaseWriter, MetricsProcessor
 from minwm.modeling import build_model
+from minwm.utils import comm
 
 
 @pytest.fixture
@@ -315,6 +316,55 @@ def test_wandb_resume_continues_the_same_run(fake_module, tmp_path, monkeypatch)
     cfg["checkpoint"] = {"resume": False}
     fresh = _train_with_fake_wandb(cfg, monkeypatch, new_run_id="other")
     assert fresh["id"] is None
+
+
+# ---- validation ----------------------------------------------------------
+
+
+def _val_trainer(fake_module, out, num_val=4, **training):
+    class ValRecipe(fake_module.TinyRecipe):
+        seen = []
+
+        def validation_step(self, model, batch, index):
+            ValRecipe.seen.append((torch.is_grad_enabled(), model.training))
+            return {"val/index": float(index), "val/batch": float(batch.shape[0])}
+
+    fake_module.ValRecipe = ValRecipe
+
+    class T(BaseTrainer):
+        def build_dataloader(self, data_cfg):
+            return [torch.randn(2, 4)]
+
+        def build_val_dataset(self, data_cfg):
+            return [torch.randn(4) for _ in range(num_val)]
+
+    cfg = {
+        "model": {"type": "minwm_test_fakes:TinyModel", "dim": 4},
+        "recipe": {"type": "minwm_test_fakes:ValRecipe"},
+        "training": {"max_steps": 2, "log_interval": 0, "output_dir": out, **training},
+    }
+    return T(cfg), ValRecipe
+
+
+def test_evaluate_averages_val_metrics_without_grad(fake_module, tmp_path):
+    t, recipe = _val_trainer(fake_module, str(tmp_path), eval_interval=2)
+    writer = _CaptureWriter()
+    t.metrics_processor._writers = writer
+    t.train()
+
+    evals = [(step, m) for step, m in writer.captured if "val/index" in m]
+    assert [step for step, _ in evals] == [0, 2]  # before training, then every 2 steps
+    assert evals[0][1]["val/index"] == 1.5  # mean over samples 0..3
+    assert evals[0][1]["val/batch"] == 1.0  # one collated sample per call
+    assert recipe.seen and all(not grad and not mode for grad, mode in recipe.seen)
+    assert t.model.training
+
+
+def test_evaluate_rejects_val_size_not_divisible_by_dp(fake_module, tmp_path, monkeypatch):
+    t, _ = _val_trainer(fake_module, str(tmp_path), num_val=4)
+    monkeypatch.setattr(comm, "get_dp_world_size", lambda: 3)
+    with pytest.raises(ValueError, match="multiple of the data-parallel size 3"):
+        t.evaluate()
 
 
 # ---- checkpoint roundtrip ------------------------------------------------

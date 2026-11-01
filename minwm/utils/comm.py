@@ -23,6 +23,7 @@ __all__ = [
     "is_main_process",
     "synchronize",
     "all_reduce_flag",
+    "all_reduce_sum",
     "get_dp_world_size",
     "get_dp_rank",
 ]
@@ -73,6 +74,31 @@ def all_reduce_flag(flag: bool) -> bool:
     t = torch.tensor(1 if flag else 0, device=device)
     dist.all_reduce(t, op=dist.ReduceOp.MAX)
     return bool(t.item())
+
+
+def all_reduce_sum(values: list[float]) -> list[float]:
+    """Element-wise sum of ``values`` across the global group.
+
+    Returns ``values`` unchanged when ``torch.distributed`` is unavailable /
+    uninitialized or the world size is 1.
+
+    Args:
+        values (list[float]): this process's local values; same length on every rank.
+
+    Returns:
+        list[float]: the summed values.
+    """
+    if not _dist_ready() or dist.get_world_size() == 1:
+        return list(values)
+    import torch
+
+    if dist.get_backend() == "nccl":
+        device = torch.device("cuda", torch.cuda.current_device())
+    else:
+        device = torch.device("cpu")
+    t = torch.tensor(values, dtype=torch.float64, device=device)
+    dist.all_reduce(t)
+    return t.tolist()
 
 
 def get_world_size() -> int:

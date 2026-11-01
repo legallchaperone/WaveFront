@@ -549,6 +549,12 @@ def test_monitor_strict_rejects_typo():
         MWMConfig.from_dict({"monitor": {"backend": ["wandb"]}})
 
 
+def test_data_val_dataset_parses_as_node():
+    cfg = MWMConfig.from_dict({"data": {"val_dataset": {"type": "Mock", "length": 8}}})
+    assert cfg.data.val_dataset.length == 8
+    assert MWMConfig.from_dict({}).data.val_dataset is None
+
+
 def test_to_dict_is_plain_and_roundtrips():
     import json
 

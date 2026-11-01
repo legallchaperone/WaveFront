@@ -21,6 +21,7 @@ from typing import Any, Iterator
 
 import torch
 from torch import nn
+from torch.utils.data import default_collate
 
 from minwm.config import MWMConfig
 from minwm.config.lazy import build as _build_cfg
@@ -166,6 +167,7 @@ class BaseTrainer:
         self.optimizers.update(self.recipe.build_auxiliary_optimizers(self.auxiliary_models))
         self.dataloader = self.build_dataloader(self.cfg.data)
         self._data_iter: Iterator[Any] | None = None
+        self.val_dataset = self.build_val_dataset(self.cfg.data)
 
         self.storage = EventStorage(self.step)
         run_dir = local_run_dir(self.cfg.training.output_dir)
@@ -178,9 +180,8 @@ class BaseTrainer:
 
     def _run_config(self) -> dict[str, Any]:
         """Full config plus runtime facts the config alone doesn't pin down."""
-        training = self.cfg.training
         world_size = comm.get_world_size()
-        dp_size = world_size // (training.sp_size * training.tp_size)
+        dp_size = comm.get_dp_world_size()
         dataset = getattr(self.dataloader, "dataset", None)
         runtime = {
             "world_size": world_size,
@@ -405,6 +406,19 @@ class BaseTrainer:
             return None
         return _build_dataloader_cfg(data)
 
+    def build_val_dataset(self, data: Data) -> Any:
+        """Build the held-out validation dataset, or ``None`` when not configured.
+
+        Args:
+            data (Data): the typed ``data`` config; reads ``data.val_dataset``.
+
+        Returns:
+            Any: an indexable dataset, or ``None`` when ``data.val_dataset`` is unset.
+        """
+        if not data.val_dataset:
+            return None
+        return _build_cfg(data.val_dataset)
+
     def _module_for_optimizer(self, optimizer: torch.optim.Optimizer) -> nn.Module:
         """Find the module whose parameters ``optimizer`` steps.
 
@@ -527,7 +541,59 @@ class BaseTrainer:
         load_model_weights(module, path, sharded=self._fsdp, select=_extract_pretrained_state)
 
     def evaluate(self) -> dict[str, float]:
-        return {}
+        """Average the recipe's per-sample validation metrics over ``val_dataset``.
+
+        Samples are split across data-parallel replicas (ranks of one SP group
+        share samples), run under ``torch.no_grad()`` with the model in eval mode,
+        and each metric is averaged over all samples.
+
+        Returns:
+            dict[str, float]: averaged metrics; ``{}`` without a val dataset or when
+            the recipe reports no metrics.
+
+        Raises:
+            ValueError: if the val set size is not a multiple of the data-parallel
+                size (FSDP needs every rank to run the same number of forwards).
+        """
+        if self.val_dataset is None:
+            return {}
+        num_samples = len(self.val_dataset)
+        dp_size, dp_rank = comm.get_dp_world_size(), comm.get_dp_rank()
+        if num_samples % dp_size:
+            raise ValueError(
+                f"val_dataset has {num_samples} samples, not a multiple of the "
+                f"data-parallel size {dp_size}"
+            )
+        collate_cfg = self.cfg.data.collate_fn
+        collate = _build_cfg(collate_cfg) if collate_cfg else default_collate
+
+        sums: dict[str, float] = {}
+        was_training = self.model.training
+        self.model.eval()
+        try:
+            with torch.no_grad():
+                for index in range(dp_rank, num_samples, dp_size):
+                    batch = collate([self.val_dataset[index]])
+                    metrics = self.recipe.validation_step(self.model, batch, index)
+                    for name, value in metrics.items():
+                        sums[name] = sums.get(name, 0.0) + float(value)
+        finally:
+            self.model.train(was_training)
+        if not sums:
+            return {}
+
+        names = sorted(sums)
+        totals = comm.all_reduce_sum([sums[name] for name in names])
+        # Every rank of an SP group computed the same samples; count them once.
+        ranks_per_replica = comm.get_world_size() // dp_size
+        return {
+            name: total / (num_samples * ranks_per_replica) for name, total in zip(names, totals)
+        }
+
+    def _log_eval(self) -> None:
+        eval_metrics = self.evaluate()
+        if eval_metrics:
+            self.metrics_processor.log(self.step, eval_metrics)
 
     def close(self) -> None:
         """Flush and release the metrics processor's writers (idempotent)."""
@@ -568,6 +634,9 @@ class BaseTrainer:
         training = self.cfg.training
         with self.storage:
             try:
+                # Score the starting weights once; a resumed run logged this already.
+                if training.eval_interval and self.step == 0:
+                    self._log_eval()
                 while self.step < training.max_steps:
                     self.storage.iter = self.step
                     profile = self.cfg.profile
@@ -614,9 +683,7 @@ class BaseTrainer:
                     if training.log_interval and self.step % training.log_interval == 0:
                         self.metrics_processor.log(self.step, self.storage.latest())
                     if training.eval_interval and self.step % training.eval_interval == 0:
-                        eval_metrics = self.evaluate()
-                        if eval_metrics:
-                            self.metrics_processor.log(self.step, eval_metrics)
+                        self._log_eval()
                     if training.ckpt_interval and self.step % training.ckpt_interval == 0:
                         self.save_checkpoint()
 

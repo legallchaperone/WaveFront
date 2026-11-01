@@ -461,3 +461,21 @@ class Recipe(ABC):
             NotImplementedError: if a subclass does not implement it.
         """
         raise NotImplementedError
+
+    def validation_step(self, model: nn.Module, batch: Any, index: int) -> dict[str, float]:
+        """Validation metrics for one held-out sample; the base recipe reports none.
+
+        The trainer calls this once per ``data.val_dataset`` sample, under
+        ``torch.no_grad()`` with the model in eval mode, and averages each metric
+        over all samples and ranks — so every call must return the same keys.
+
+        Args:
+            model (nn.Module): the trainer-owned primary model.
+            batch (Any): one collated sample (batch size 1).
+            index (int): the sample's index in the val dataset. It does not depend
+                on the parallel layout, so it can seed per-sample noise.
+
+        Returns:
+            dict[str, float]: metric name -> value; ``{}`` reports nothing.
+        """
+        return {}

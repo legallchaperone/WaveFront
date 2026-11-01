@@ -146,6 +146,8 @@ class Data:
 
     dataset: DictConfig = field(default_factory=_empty_node)
     """Polymorphic ``type`` node built into a Dataset (open schema)."""
+    val_dataset: DictConfig | None = None
+    """Optional held-out ``type`` node for periodic validation (``training.eval_interval``)."""
     collate_fn: DictConfig | None = None
     """Optional polymorphic ``type`` node for a collate fn (open schema)."""
     batch_size: int = 1
@@ -399,9 +401,11 @@ def _parse_data(node: dict) -> Data:
         raise ValueError(f"unknown key(s) {bad} in Data; valid keys: {keys}")
 
     dataset = OmegaConf.create(node.pop("dataset", {}))
+    val_dataset = node.pop("val_dataset", None)
     collate = node.pop("collate_fn", None)
     return Data(
         dataset=dataset,
+        val_dataset=OmegaConf.create(val_dataset) if val_dataset is not None else None,
         collate_fn=OmegaConf.create(collate) if collate is not None else None,
         **node,
     )
