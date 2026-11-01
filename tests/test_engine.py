@@ -265,7 +265,8 @@ def _train_with_fake_wandb(cfg, monkeypatch, new_run_id="run0"):
 
     def init(**kw):
         init_kwargs.update(kw)
-        return types.SimpleNamespace(id=kw["id"] or new_run_id)
+        run_id = kw["id"] or new_run_id
+        return types.SimpleNamespace(id=run_id, path=f"me/{kw['project']}/{run_id}")
 
     fake_wandb = types.ModuleType("wandb")
     fake_wandb.run = None
@@ -303,10 +304,14 @@ def test_wandb_run_config_records_hyperparams(fake_module, tmp_path, monkeypatch
 
 
 def test_wandb_resume_continues_the_same_run(fake_module, tmp_path, monkeypatch):
-    cfg = _wandb_cfg(str(tmp_path), wandb_group="phase0", wandb_tags=["b2"], wandb_notes="smoke")
+    monkeypatch.delenv("WANDB_RUN_NAME", raising=False)
+    out = tmp_path / "b2-jointdisp"
+    cfg = _wandb_cfg(str(out), wandb_group="phase0", wandb_tags=["b2"], wandb_notes="smoke")
     first = _train_with_fake_wandb(cfg, monkeypatch, new_run_id="abc")
     assert first["id"] is None and first["resume"] is None
+    assert first["name"] == "b2-jointdisp"  # defaults to the output dir's name
     assert (first["group"], first["tags"], first["notes"]) == ("phase0", ["b2"], "smoke")
+    assert (out / "wandb_run_path.txt").read_text() == f"me/{first['project']}/abc"
 
     cfg["training"]["max_steps"] = 2
     cfg["checkpoint"] = {"resume": True}

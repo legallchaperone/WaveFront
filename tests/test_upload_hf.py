@@ -58,3 +58,30 @@ def test_main_names_the_folder_after_the_run(tmp_path, monkeypatch):
     monkeypatch.setattr(huggingface_hub, "HfApi", lambda: api)
     main(["--output-dir", f"{run_dir}/", "--steps", "1000", "--repo", "u/repo"])
     assert api.uploads[0][1:] == ("b2-jointdisp/model_1000.safetensors", "u/repo")
+
+
+def test_main_links_checkpoints_in_the_wandb_run(tmp_path, monkeypatch):
+    import types
+
+    import huggingface_hub
+
+    run_dir = tmp_path / "b2-jointdisp"
+    _export(run_dir, 1000, 2000)
+    (run_dir / "wandb_run_path.txt").write_text("me/wavefront/abc\n")
+    monkeypatch.setattr(huggingface_hub, "HfApi", lambda: _FakeHfApi())
+    written = {}
+
+    class _FakeApi:
+        def run(self, path):
+            written["path"] = path
+            return types.SimpleNamespace(summary=types.SimpleNamespace(update=written.update))
+
+    monkeypatch.setitem(sys.modules, "wandb", types.SimpleNamespace(Api=_FakeApi))
+    main(["--output-dir", str(run_dir), "--steps", "1000", "2000", "--repo", "u/repo"])
+
+    folder = "https://huggingface.co/u/repo/blob/main/b2-jointdisp"
+    assert written.pop("path") == "me/wavefront/abc"
+    assert written == {
+        "ckpt/step_1000": f"{folder}/model_1000.safetensors",
+        "ckpt/step_2000": f"{folder}/model_2000.safetensors",
+    }

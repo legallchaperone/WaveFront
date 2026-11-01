@@ -235,7 +235,8 @@ class Monitor:
     wandb_project: str | None = None
     """WandB project name (else the ``WANDB_PROJECT`` env var, else ``"minwm"``)."""
     wandb_run_name: str | None = None
-    """WandB run name (else the ``WANDB_RUN_NAME`` env var)."""
+    """WandB run name (else the ``WANDB_RUN_NAME`` env var, else the last component of
+    ``training.output_dir``, so the W&B run, output dir, and HF folder share a name)."""
     wandb_group: str | None = None
     """WandB group (e.g. the experiment phase); runs in one group are shown together."""
     wandb_tags: tuple[str, ...] = ()

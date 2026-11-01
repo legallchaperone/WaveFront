@@ -10,6 +10,10 @@ first upload, so a missing export fails without a partial upload.
 The token is never passed in: ``huggingface_hub`` reads the one saved by
 ``hf auth login`` (or the ``HF_TOKEN`` env var).
 
+If the run logged to W&B (``<output-dir>/wandb_run_path.txt`` exists), each file's
+URL is then written to that run's summary as ``ckpt/step_{step}``. W&B's API
+rewrites the whole summary, so run this only after training has finished.
+
 Usage::
 
     python tools/upload_hf.py --output-dir $RUN --steps 1000 2000 3000 \\
@@ -23,6 +27,7 @@ from typing import Any
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
+from minwm.engine.monitor import WandBWriter  # noqa: E402
 from minwm.engine.paths import ckpt_dir  # noqa: E402
 
 
@@ -83,6 +88,19 @@ def upload_checkpoints(
     return urls
 
 
+def link_in_wandb(run_path: str, urls: dict[int, str]) -> None:
+    """Write checkpoint URLs into a W&B run's summary as ``ckpt/step_{step}``.
+
+    Args:
+        run_path (str): the W&B run, ``entity/project/run_id``.
+        urls (dict[int, str]): step -> checkpoint URL.
+    """
+    import wandb
+
+    run = wandb.Api().run(run_path)
+    run.summary.update({f"ckpt/step_{step}": url for step, url in urls.items()})
+
+
 def main(argv: list[str] | None = None) -> None:
     """Upload the requested steps of one run (``argv`` defaults to ``sys.argv[1:]``)."""
     from huggingface_hub import HfApi
@@ -90,7 +108,16 @@ def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     run_name = os.path.basename(os.path.normpath(args.output_dir))
     export_dir = args.export_dir or os.path.join(ckpt_dir(args.output_dir), "exported")
-    upload_checkpoints(HfApi(), args.repo, run_name, export_dir, args.steps)
+    urls = upload_checkpoints(HfApi(), args.repo, run_name, export_dir, args.steps)
+
+    path_file = os.path.join(args.output_dir, WandBWriter.RUN_PATH_FILE)
+    if not os.path.isfile(path_file):
+        print(f"[upload_hf] no {path_file}; skipping the W&B link", flush=True)
+        return
+    with open(path_file) as f:
+        run_path = f.read().strip()
+    link_in_wandb(run_path, urls)
+    print(f"[upload_hf] linked {len(urls)} checkpoint(s) in W&B run {run_path}", flush=True)
 
 
 if __name__ == "__main__":

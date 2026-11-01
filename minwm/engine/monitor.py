@@ -61,19 +61,21 @@ class TensorBoardWriter(BaseWriter):
 class WandBWriter(BaseWriter):
     """Fan metrics out to Weights & Biases.
 
-    The run id is saved to ``<log_dir>/wandb_run_id.txt``. A resumed training run
-    reads it back and keeps logging to the same W&B run; a fresh run starts a new
-    W&B run and overwrites the file.
+    The run path (``entity/project/run_id``) is saved to
+    ``<log_dir>/wandb_run_path.txt``. A resumed training run reads it back and keeps
+    logging to the same W&B run; a fresh run starts a new W&B run and overwrites the
+    file. ``tools/upload_hf.py`` reads it to attach checkpoint links to the run.
 
     Args:
         cfg (Monitor): W&B knobs. ``wandb_project`` falls back to ``WANDB_PROJECT``
-            then ``"minwm"``; ``wandb_run_name`` falls back to ``WANDB_RUN_NAME``.
-        log_dir (str): directory used as the W&B run dir and for the run-id file.
+            then ``"minwm"``; ``wandb_run_name`` falls back to ``WANDB_RUN_NAME``,
+            then the last component of ``log_dir``.
+        log_dir (str): the run's output dir; W&B run dir and home of the run-path file.
         config (dict | None): run hyperparameters, stored as the W&B run config.
         resume (bool): continue the W&B run recorded in ``log_dir``, if any.
     """
 
-    RUN_ID_FILE = "wandb_run_id.txt"
+    RUN_PATH_FILE = "wandb_run_path.txt"
 
     def __init__(
         self,
@@ -86,14 +88,18 @@ class WandBWriter(BaseWriter):
 
         self._wandb = wandb
         os.makedirs(log_dir, exist_ok=True)
-        id_path = os.path.join(log_dir, self.RUN_ID_FILE)
+        path_file = os.path.join(log_dir, self.RUN_PATH_FILE)
         run_id = None
-        if resume and os.path.exists(id_path):
-            with open(id_path) as f:
-                run_id = f.read().strip() or None
+        if resume and os.path.exists(path_file):
+            with open(path_file) as f:
+                run_id = f.read().strip().split("/")[-1] or None
         run = wandb.init(
             project=cfg.wandb_project or os.getenv("WANDB_PROJECT", "minwm"),
-            name=cfg.wandb_run_name or os.getenv("WANDB_RUN_NAME"),
+            name=(
+                cfg.wandb_run_name
+                or os.getenv("WANDB_RUN_NAME")
+                or os.path.basename(os.path.normpath(log_dir))
+            ),
             group=cfg.wandb_group,
             tags=list(cfg.wandb_tags) or None,
             notes=cfg.wandb_notes,
@@ -102,8 +108,8 @@ class WandBWriter(BaseWriter):
             id=run_id,
             resume="allow" if run_id else None,
         )
-        with open(id_path, "w") as f:
-            f.write(run.id)
+        with open(path_file, "w") as f:
+            f.write(run.path)
         logger.info("WandB logging enabled (run id %s%s)", run.id, ", resumed" if run_id else "")
 
     def log(self, metrics: dict[str, float], step: int) -> None:
