@@ -6,6 +6,9 @@
 export UV_CACHE_DIR=$WORK/.cache/uv
 export UV_PYTHON_INSTALL_DIR=$WORK/.local/uv-python
 export PIP_CACHE_DIR=$WORK/.cache/pip
+# Keep finding an existing `hf auth login` token (by default in ~/.cache/huggingface)
+# after HF_HOME moves; the token is config, not job I/O.
+export HF_TOKEN_PATH=${HF_TOKEN_PATH:-${HF_HOME:-$HOME/.cache/huggingface}/token}
 export HF_HOME=$WORK/.cache/huggingface
 # torchvision weights and pyiqa (which keeps its files under torch.hub.get_dir()).
 export TORCH_HOME=$WORK/.cache/torch

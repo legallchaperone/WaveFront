@@ -45,8 +45,10 @@ if [ -z "${TORCH_CUDA_ARCH_LIST:-}" ]; then
 fi
 arch_re='^[0-9]+\.[0-9]+(\+PTX)?([; ][0-9]+\.[0-9]+(\+PTX)?)*$'
 [[ $TORCH_CUDA_ARCH_LIST =~ $arch_re ]] || die "TORCH_CUDA_ARCH_LIST='$TORCH_CUDA_ARCH_LIST' is not a list like '8.0;8.6'"
-# FORCE_CUDA: GroundingDINO only builds its CUDA op when it sees a GPU, unless forced.
-export TORCH_CUDA_ARCH_LIST MAX_JOBS=${MAX_JOBS:-8} FORCE_CUDA=1 AM_I_DOCKER=False BUILD_WITH_CUDA=True
+# GroundingDINO compiles its CUDA op (groundingdino._C) only if it sees a GPU or if
+# AM_I_DOCKER and BUILD_WITH_CUDA are both true; otherwise it silently builds nothing and
+# object_control fails on GPU. Set both so a GPU-less login node builds it too.
+export TORCH_CUDA_ARCH_LIST MAX_JOBS=${MAX_JOBS:-8} AM_I_DOCKER=True BUILD_WITH_CUDA=True
 step "CUDA $(nvcc --version | sed -n 's/.*release \([0-9.]*\),.*/\1/p') at $CUDA_HOME; archs $TORCH_CUDA_ARCH_LIST"
 
 P=$WS_VENV/bin/python
@@ -92,16 +94,19 @@ EOF
 fi
 
 step "Grounded-SAM, SAM2, VFIMamba"
-cd "$WS_ROOT/thirdparty/Grounded-Segment-Anything"
-pip_install -e segment_anything
-pip_install --no-build-isolation -e GroundingDINO
-cd "$WS_ROOT/thirdparty/sam2"
-pip_install --no-build-isolation -e .
-pip_install --no-build-isolation causal_conv1d==1.5.0.post8 mamba_ssm==2.2.4
+if ! "$P" -c "import segment_anything, groundingdino._C, sam2, causal_conv1d, mamba_ssm" 2>/dev/null; then
+  cd "$WS_ROOT/thirdparty/Grounded-Segment-Anything"
+  pip_install -e segment_anything
+  # --reinstall-package: an earlier install may lack _C, and uv would call it satisfied.
+  pip_install --no-build-isolation --reinstall-package groundingdino -e GroundingDINO
+  cd "$WS_ROOT/thirdparty/sam2"
+  pip_install --no-build-isolation -e .
+  pip_install --no-build-isolation causal_conv1d==1.5.0.post8 mamba_ssm==2.2.4
+fi
 
 step "WorldScore"
 pip_install "$WS_ROOT"
-"$P" -c "import en_core_web_sm" 2>/dev/null || "$P" -m spacy download -q en_core_web_sm
+"$P" -c "import en_core_web_sm" 2>/dev/null || "$P" -m spacy download en_core_web_sm
 
 step "metric checkpoints (about 5 GB)"
 K=$WS_ROOT/worldscore/benchmark/metrics/checkpoints
@@ -127,7 +132,7 @@ ls -la "$K"
 
 step "import check"
 cd "$WS_ROOT"
-"$P" -c "import droid_backends, lietorch, groundingdino, sam2, mamba_ssm, worldscore"
+"$P" -c "import droid_backends, lietorch, groundingdino._C, sam2, mamba_ssm, worldscore"
 # The metrics package imports every metric (and their CUDA ops) at once.
 "$P" -c "import torch, worldscore.benchmark.metrics; print('WorldScore env ok; GPU visible:', torch.cuda.is_available())"
 
