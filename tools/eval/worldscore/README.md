@@ -53,6 +53,21 @@ nohup bash tools/eval/worldscore/setup_delta.sh > $WORK/setup_worldscore.log 2>&
 - 中途失败就重跑同一条命令，做完的步骤会跳过。WorldScore 环境单独重装用 `install_worldscore.sh`（Colab 也用它）。
 - 没装 flash-attn：minWM 的 attention 在没有它时自动退回 PyTorch 的 SDPA。
 
+## Delta 的使用规则
+
+按 NCSA 的 Delta 用户手册（[Data Management](https://docs.ncsa.illinois.edu/systems/delta/en/latest/user_guide/data_mgmt.html)、[Login](https://docs.ncsa.illinois.edu/systems/delta/en/latest/user_guide/login.html)、[Running Jobs](https://docs.ncsa.illinois.edu/systems/delta/en/latest/user_guide/running_jobs.html)、[Software](https://docs.ncsa.illinois.edu/systems/delta/en/latest/user_guide/software.html)）核对过：
+
+- **放哪里**：
+  - 代码、两个 Python 环境、权重、数据集、缓存和输出都在 `$WORK`（`/work/hdd/<项目>/$USER`）。手册说这里是"where I/O from jobs should occur"。
+  - `$HOME`（100 GB、75 万个文件）"not intended as a source/destination for I/O during jobs"。所以安装和作业里的 uv、pip、Hugging Face、torch 缓存都由 `delta_env.sh` 指到 `$WORK/.cache`，Triton 的编译缓存放在计算节点本地的 `/tmp`（作业结束即清空）。
+  - `/work` 没有快照和备份，Delta 也不提供归档：结果（`summary.md`、`evaluation.json`、视频）要拉回本地保存。
+- **登录节点**：每人最多用 16 个核、37 GB 内存（硬上限 62 GB，没有 swap）。`setup_delta.sh` 在这里下载和编译，编译用 8 个并行任务。生成和打分只在作业里跑；不要在登录节点跑 Jupyter。
+- **计算节点能不能上网**：手册没写。所以 `setup_delta.sh` 在登录节点就把作业要用的全部权重下好，包括各指标第一次运行时才会下载的那些（`prefetch_metric_weights.py`），作业里设 `HF_HUB_OFFLINE=1`。
+- **Slurm**：
+  - 可抢占分区手册"only recommended for jobs that include checkpointing"。这里按样例续跑：被抢占最多丢掉正在做的那一个样例；`--requeue` 让作业自动重新排队，重排后脚本从头开始，做完的会跳过。
+  - 每张卡配 16 个核、60 GB 内存。A40 节点有 64 个核、约 243 GB 可分配内存，4 张卡（240 GB）刚好放得下。
+  - 单个作业最长 48 小时。interactive 分区只用于 1 小时内的调试，每人同时只能有一个作业。
+
 ## 运行
 
 在 Delta 的仓库根目录用 `submit_delta.sh` 提交，它生成作业脚本、交给 sbatch，所有输出放进 `$WORK/outputs/WaveFront/<run 名>/`（`summary.md`、样例目录和视频、`slurm-<作业号>.out`、提交的作业脚本 `job-<作业号>.sbatch`）。默认用可抢占的 `gpuA40x4-preempt`（扣费系数 0.25），被抢占会自动重新排队；作业失败或超时就用同一个 run 名重交，每一步都会跳过已经做完的部分。

@@ -67,6 +67,12 @@ cd $(printf %q "$repo")
 echo "job \$SLURM_JOB_ID on \$(hostname), commit \$(git rev-parse --short HEAD), \$(date)"
 source $(printf %q "$venv/bin/activate")
 export WORK=$(printf %q "$WORK") OUT_DIR=$(printf %q "$out") TOKENIZERS_PARALLELISM=false
+# Caches under \$WORK (not \$HOME); setup_delta.sh already fetched every weight there,
+# so never reach for the network mid-job.
+source tools/eval/worldscore/delta_env.sh
+export HF_HUB_OFFLINE=1
+# Kernel caches are many small files: node-local /tmp, cleared after the job.
+export TRITON_CACHE_DIR=/tmp/\$USER-triton-\$SLURM_JOB_ID
 bash tools/eval/worldscore/$script $args
 EOF
 } >"$job"

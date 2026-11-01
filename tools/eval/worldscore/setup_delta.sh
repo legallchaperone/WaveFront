@@ -5,10 +5,13 @@
 #   $WORK/WorldScore          WorldScore checkout + metric checkpoints
 #   $WORK/data/WorldScore-Dataset
 #   $WORK/ckpts               Wan 2.1 base + minWM Stage 1 weights; the repo's ckpts/ links here
+#   $WORK/.cache              uv/pip/HF/torch caches, incl. the weights the metrics fetch
+#                             on first use (delta_env.sh), so jobs need no internet
 #
 # Run it on a login node from the repo root, in the background (about an hour,
-# mostly downloads and compiling DROID-SLAM; NCSA's guides put software installs
-# and file transfers on login nodes, and compute nodes may lack internet):
+# mostly downloads and compiling DROID-SLAM). Delta caps each user on a login node at
+# 16 cores and 37 GB (62 GB hard, no swap); compiles here use 8 jobs. Compute nodes'
+# internet access is undocumented, so everything a job needs is fetched here:
 #   export WORK=/work/hdd/<project>/$USER
 #   nohup bash tools/eval/worldscore/setup_delta.sh > $WORK/setup_worldscore.log 2>&1 &
 # Rerunning skips finished steps. Needs no GPU.
@@ -18,10 +21,10 @@ set -eo pipefail
 cd "$(dirname "$0")/../../.."
 step() { echo "== $(date +%H:%M:%S) $*"; }
 
-export UV_CACHE_DIR=${UV_CACHE_DIR:-$WORK/.cache/uv}
-export UV_PYTHON_INSTALL_DIR=${UV_PYTHON_INSTALL_DIR:-$WORK/.local/uv-python}
-export HF_HOME=${HF_HOME:-$WORK/.cache/huggingface}
-mkdir -p "$WORK/venvs" "$WORK/data" "$WORK/ckpts" "$WORK/outputs"
+source tools/eval/worldscore/delta_env.sh
+# Build temporaries (nvcc, pip) off the login node's shared /tmp.
+export TMPDIR=$WORK/.tmp
+mkdir -p "$TMPDIR" "$WORK/venvs" "$WORK/data" "$WORK/ckpts" "$WORK/outputs"
 
 step "uv"
 [ -x "$WORK/venvs/tools/bin/uv" ] || { python3 -m venv "$WORK/venvs/tools" && "$WORK/venvs/tools/bin/pip" install -q uv; }

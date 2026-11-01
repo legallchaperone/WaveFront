@@ -130,4 +130,7 @@ cd "$WS_ROOT"
 "$P" -c "import droid_backends, lietorch, groundingdino, sam2, mamba_ssm, worldscore"
 # The metrics package imports every metric (and their CUDA ops) at once.
 "$P" -c "import torch, worldscore.benchmark.metrics; print('WorldScore env ok; GPU visible:', torch.cuda.is_available())"
+
+step "weights the metrics download on first use (to TORCH_HOME / HF_HOME)"
+"$P" "$here/prefetch_metric_weights.py"
 step "done: WS_PYTHON=$P"
