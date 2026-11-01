@@ -17,7 +17,7 @@ import sys
 import traceback
 from pathlib import Path
 
-from _common import instance_dirs, register_model, worldscore_config
+from _common import instance_dirs, keep_clip_downloads_off_home, register_model, worldscore_config
 
 
 def parse_args() -> argparse.Namespace:
@@ -36,6 +36,7 @@ def main() -> None:
     dataset_root = os.path.abspath(args.dataset_root)
     worldscore_root = os.path.abspath(args.worldscore_root)
     register_model()
+    keep_clip_downloads_off_home()
     # WorldScore loads metric checkpoints from paths relative to its checkout.
     os.chdir(worldscore_root)
     from worldscore.benchmark.helpers.evaluator import Evaluator, process_batch

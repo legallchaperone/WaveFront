@@ -7,6 +7,7 @@ Only numpy is imported at module level, so ``pack.py`` / ``summarize.py`` and th
 tests run without WorldScore installed.
 """
 
+import functools
 import glob
 import os
 import re
@@ -167,6 +168,23 @@ def check_motion(layout: str, w2c: np.ndarray, translation_scale: float = 1.0) -
     ):
         if (sign == 0 and abs(value) > 1e-3) or (sign != 0 and np.sign(value) != sign):
             raise ValueError(f"{layout}: final camera {name}={value:.4f}, expected sign {sign}")
+
+
+def keep_clip_downloads_off_home() -> None:
+    """Make openai-clip's ``clip.load`` keep its weights under the torch hub dir.
+
+    pyiqa's LAION aesthetic metric calls ``clip.load("ViT-L/14")``, whose download root
+    is hardcoded to ``~/.cache/clip`` and reads no environment variable. On Delta $HOME
+    must not serve job I/O, so default it to ``<torch.hub.get_dir()>/clip`` (under
+    TORCH_HOME), where pyiqa's own CLIP loader already keeps its weights. A caller's
+    explicit ``download_root`` still wins. Call before any metric is built.
+    """
+    import clip
+    import torch
+
+    clip.load = functools.partial(
+        clip.load, download_root=os.path.join(torch.hub.get_dir(), "clip")
+    )
 
 
 def register_model() -> None:

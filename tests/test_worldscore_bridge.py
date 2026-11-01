@@ -97,6 +97,21 @@ def test_instance_id_round_trips_and_rejects_unsafe_paths():
         _common.instance_id(os.path.join("static", "a b", "000"))
 
 
+def test_clip_downloads_default_to_the_torch_hub_dir(monkeypatch, tmp_path):
+    import types
+
+    import torch
+
+    fake = types.ModuleType("clip")
+    fake.load = lambda name, device="cpu", jit=False, download_root=None: download_root
+    monkeypatch.setitem(sys.modules, "clip", fake)
+    monkeypatch.setenv("TORCH_HOME", str(tmp_path))
+    _common.keep_clip_downloads_off_home()
+    assert fake.load("ViT-L/14") == os.path.join(torch.hub.get_dir(), "clip")
+    assert torch.hub.get_dir().startswith(str(tmp_path))
+    assert fake.load("ViT-L/14", download_root="/elsewhere") == "/elsewhere"
+
+
 def test_instance_seed_is_fixed_by_id():
     a = "static--photorealistic--indoor--dining_spaces--000"
     assert _common.instance_seed(a) == _common.instance_seed(a)
