@@ -1,12 +1,12 @@
 #!/bin/bash
-# The small WorldScore benchmark: 16 static instances, photorealistic, one camera
-# move each -- push_in, move_left, orbit_left (parallax) and pan_left (none) x
-# indoor/outdoor x 2 -- and no dynamic split. Enough to watch videos and spot
-# gross failures; too few per move to compare methods (use run.sh's full subset).
+# The small WorldScore benchmark: 40 static instances, photorealistic, one camera
+# move each -- push_in, pull_out, move_left, orbit_left (parallax) and pan_left
+# (none) x indoor/outdoor x 4 -- and no dynamic split. 8 per move: enough to see
+# per-move trends and watch videos; for method comparisons use run.sh's full subset.
 #
 # A thin wrapper over run.sh that fixes the subset, so every small-benchmark run
-# evaluates the same 16 instances. The subset nests in the full one: rerunning
-# run.sh with the same OUT_DIR grows it without regenerating these 16.
+# evaluates the same 40 instances. The subset nests in the full one: rerunning
+# run.sh with the same OUT_DIR grows it without regenerating these 40.
 #
 # Usage (from the repo root, in the minWM environment):
 #   bash tools/eval/worldscore/run_small.sh [minWM infer config] [dotlist overrides...]
@@ -16,7 +16,7 @@
 # WS_DATASET, WS_PYTHON, WS_PREP_PYTHON, WS_STAGE); OUT_DIR defaults to
 # ./local/worldscore-small. WS_PREPARE_ARGS is set here and must not be.
 #
-# Delta (one A40, about 2-3 h estimated, unmeasured):
+# Delta (estimated, unmeasured: 5-8 h on one A40, about half on two):
 #   bash tools/eval/worldscore/submit_delta.sh <run name>
 # Colab: tools/eval/worldscore/colab.ipynb calls this script.
 set -eo pipefail
@@ -31,6 +31,6 @@ if [ $# -ge 1 ] && [[ $1 != *=* ]]; then
   shift
 fi
 
-export WS_PREPARE_ARGS="--moves push_in,move_left,orbit_left,pan_left --static-per-group 2 --dynamic-per-group 0"
+export WS_PREPARE_ARGS="--moves push_in,pull_out,move_left,orbit_left,pan_left --static-per-group 4 --dynamic-per-group 0"
 export OUT_DIR=${OUT_DIR:-./local/worldscore-small}
 exec bash "$(dirname "$0")/run.sh" "$cfg" "$@"

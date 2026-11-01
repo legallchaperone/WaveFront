@@ -9,11 +9,11 @@
 | 规模 | 内容 | 个数 | `WS_PREPARE_ARGS` |
 |---|---|---|---|
 | 最小 | 4 种运动 × 室内/室外 × 1 | 8 | `--moves push_in,move_left,orbit_left,pan_left --static-per-group 1 --dynamic-per-group 0` |
-| **小 benchmark**（`run_small.sh`，Colab 默认） | 4 种运动 × 室内/室外 × 2 | 16 | 由 `run_small.sh` 固定：`--moves push_in,move_left,orbit_left,pan_left --static-per-group 2 --dynamic-per-group 0` |
+| **小 benchmark**（`run_small.sh`，Colab 默认） | 5 种运动 × 室内/室外 × 4 | 40 | 由 `run_small.sh` 固定：`--moves push_in,pull_out,move_left,orbit_left,pan_left --static-per-group 4 --dynamic-per-group 0` |
 | 完整（proposal 7.1） | 静态 8 种运动 × 室内/室外 × 6，加动态 5 类 × 5 | 121 | 空（默认） |
 
-- **小子集怎么选的**：左右对称的运动（move/orbit/pan 的 left 和 right）几何上等价，各留一个；pull_out 和 push_in 同理只留 push_in。剩下的 push_in、move_left、orbit_left 有视差，pan_left 没有，仍能做"有视差 / 无视差"的对比。动态子集（相机固定）用来检查各方法的动态有没有掉，只看原版 minWM 时用不上。
-- **小子集只够看效果、看视频**：每种运动只有 4 个（最小规模只有 2 个），单行的数字噪声很大；要比较方法，至少用完整规模的静态部分。
+- **小 benchmark 怎么选的**：move、orbit、pan 的左右两个方向在相机轨迹上是镜像，只留左边。前后两个方向不是镜像：push_in 留在原场景里，pull_out 往后退，画面边缘会露出没见过的内容，WorldScore 把它和 move、pan 一样算作"走进新场景"，所以两个都留。push_in、pull_out、move_left、orbit_left 有视差，pan_left 只转不移、没有视差，用来做"有视差 / 无视差"的对比。动态子集（相机固定）用来检查各方法的动态有没有掉，只评原版 minWM 时用不上，比较方法时再加。
+- **小 benchmark 的样本量**：每种运动 8 个，"有视差"一行 32 个、"无视差"一行 8 个，10 个场景类别都覆盖到。够看各种运动的趋势、看视频；单种运动之间差几分仍说明不了问题，正式比较方法用完整规模。
 - **子集只增不减**：同一个种子下，小的子集包含在大的里面。同一个 run 名先跑小的，再把 `WS_PREPARE_ARGS` 改大重跑，只会生成和评新增的样例，已有的直接沿用。改小、换风格或换种子会报错，要换 run 名。抽到的样例记在 `$OUT_DIR/subset/`。
 - **生成顺序**：每组先出一个，再每组出第二个，以此类推。中途停掉，已完成的部分也均匀覆盖各种运动。
 
@@ -34,7 +34,7 @@
 
 - **卡**：A100 40 GB。推理时 T5 编码器（11 GB）、DiT、CFG 的两份 KV cache（约 11.5 GB）和 VAE 解码都在卡上，估计峰值 30 GB 以上，L4（24 GB）和 T4（16 GB，且不支持 bf16）不行。H100 可以，笔记本会给 DROID-SLAM 补编 sm_90。
 - **省时间**：WorldScore 环境的编译（约 30–40 分钟，主要是 DROID-SLAM）只吃 CPU，笔记本让它在后台跑，同时在前台装 minWM、下载权重、生成视频（`WS_STAGE=gen`），生成完再等编译结束、打分（`WS_STAGE=score`）。`prepare.py` 直接从 `WS_ROOT` 导入 WorldScore 的纯 Python 部分，所以生成不用等编译。
-- **耗时估计**（A100，未实测）：小子集约 1.5 小时（装环境和下载 10 分钟、生成 16 × 2–3 分钟、打分 16 × 1.5–3 分钟，编译藏在生成后面），完整子集约 9–11 小时。
+- **耗时估计**（A100，未实测）：小 benchmark 约 2.5–4 小时（装环境和下载 10 分钟、生成 40 × 2–3 分钟、打分 40 × 1.5–3 分钟，编译藏在生成后面），完整子集约 9–11 小时。
 
 ## 一次性准备（Delta）
 
@@ -57,7 +57,15 @@ nohup bash tools/eval/worldscore/setup_delta.sh > $WORK/setup_worldscore.log 2>&
 
 在 Delta 的仓库根目录用 `submit_delta.sh` 提交，它生成作业脚本、交给 sbatch，所有输出放进 `$WORK/outputs/WaveFront/<run 名>/`（`summary.md`、样例目录和视频、`slurm-<作业号>.out`、提交的作业脚本 `job-<作业号>.sbatch`）。默认用可抢占的 `gpuA40x4-preempt`（扣费系数 0.25），被抢占会自动重新排队；作业失败或超时就用同一个 run 名重交，每一步都会跳过已经做完的部分。
 
-**小 benchmark**：`run_small.sh` 固定那 16 个样例，默认评原版 minWM（Stage 1 权重，50 步 UniPC，CFG 3.0），同时当冒烟。一张 A40，估计 2–3 小时（未实测），默认给 4 小时：
+**小 benchmark**：`run_small.sh` 固定那 40 个样例，默认评原版 minWM（Stage 1 权重，50 步 UniPC，CFG 3.0）。耗时估计（未实测）一张 A40 5–8 小时，两张大约减半；默认给 10 小时。
+
+先冒烟，只生成并评 2 个，顺便量出每个样例的实际耗时：
+
+```bash
+TIME=01:00:00 bash tools/eval/worldscore/submit_delta.sh 2026-11-01-ws-minwm-s1 run_small.sh inference.limit=2
+```
+
+没问题就用同一个 run 名交完整的小 benchmark，冒烟做完的 2 个直接沿用：
 
 ```bash
 bash tools/eval/worldscore/submit_delta.sh 2026-11-01-ws-minwm-s1
@@ -65,7 +73,7 @@ bash tools/eval/worldscore/submit_delta.sh 2026-11-01-ws-minwm-s1
 
 换模型就在 run 名后面写 `run_small.sh`、推理 config 和覆盖项，例如 `... 2026-11-02-ws-x run_small.sh configs/wan21/action2v/infer/stage1_ar_tf.py inference.checkpoint=<路径>`。
 
-**扩到完整子集**（121 个），用同一个 run 名改用 `run.sh`，已有的 16 个直接沿用：
+**扩到完整子集**（121 个），用同一个 run 名改用 `run.sh`，已有的 40 个直接沿用：
 
 ```bash
 NGPU=4 TIME=12:00:00 bash tools/eval/worldscore/submit_delta.sh 2026-11-01-ws-minwm-s1 run.sh \

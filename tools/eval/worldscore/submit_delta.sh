@@ -5,7 +5,7 @@
 #   bash tools/eval/worldscore/submit_delta.sh <run name> [run_small.sh|run.sh] [config] [overrides...]
 #
 #   bash tools/eval/worldscore/submit_delta.sh 2026-11-01-ws-minwm-s1
-#       the small benchmark (16 instances), original minWM Stage 1
+#       the small benchmark (40 instances), original minWM Stage 1
 #   NGPU=4 TIME=12:00:00 bash tools/eval/worldscore/submit_delta.sh 2026-11-01-ws-minwm-s1 run.sh \
 #       configs/wan21/action2v/infer/stage1_ar_tf.py
 #       grow the same run to the full subset (121 instances)
@@ -16,7 +16,7 @@
 # with the default preemptible partition the job is also requeued on preemption.
 #
 # Environment (defaults in brackets): WORK (required), ACCOUNT [bjki-delta-gpu],
-# PARTITION [gpuA40x4-preempt], NGPU [1], TIME [04:00:00].
+# PARTITION [gpuA40x4-preempt], NGPU [1], TIME [10:00:00].
 set -eo pipefail
 
 usage() { sed -n '2,20p' "$0"; exit 2; }
@@ -33,7 +33,7 @@ fi
 account=${ACCOUNT:-bjki-delta-gpu}
 partition=${PARTITION:-gpuA40x4-preempt}
 ngpu=${NGPU:-1}
-walltime=${TIME:-04:00:00}
+walltime=${TIME:-10:00:00}
 
 repo=$(cd "$(dirname "$0")/../../.." && pwd)
 venv=$WORK/venvs/WaveFront
