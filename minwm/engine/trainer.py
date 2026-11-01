@@ -169,7 +169,24 @@ class BaseTrainer:
 
         self.storage = EventStorage(self.step)
         run_dir = local_run_dir(self.cfg.training.output_dir)
-        self.metrics_processor = MetricsProcessor(self.cfg.monitor, run_dir or "")
+        self.metrics_processor = MetricsProcessor(
+            self.cfg.monitor, run_dir or "", run_config=self._run_config()
+        )
+
+    def _run_config(self) -> dict[str, Any]:
+        """Full config plus runtime facts the config alone doesn't pin down."""
+        training = self.cfg.training
+        world_size = comm.get_world_size()
+        dp_size = world_size // (training.sp_size * training.tp_size)
+        dataset = getattr(self.dataloader, "dataset", None)
+        runtime = {
+            "world_size": world_size,
+            "dp_size": dp_size,
+            "global_batch_size": dp_size * self.cfg.data.batch_size,
+            "num_samples": len(dataset) if hasattr(dataset, "__len__") else None,
+            "slurm_job_id": os.environ.get("SLURM_JOB_ID"),
+        }
+        return {**self.cfg.to_dict(), "runtime": runtime}
 
     # ---- hooks (override as needed) --------------------------------------
 

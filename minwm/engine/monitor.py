@@ -66,9 +66,16 @@ class WandBWriter(BaseWriter):
         project (str | None): project name; falls back to ``WANDB_PROJECT`` then
             ``"minwm"``.
         run_name (str | None): run name; falls back to ``WANDB_RUN_NAME``.
+        config (dict | None): run hyperparameters, stored as the W&B run config.
     """
 
-    def __init__(self, log_dir: str, project: str | None, run_name: str | None) -> None:
+    def __init__(
+        self,
+        log_dir: str,
+        project: str | None,
+        run_name: str | None,
+        config: dict | None = None,
+    ) -> None:
         import wandb
 
         self._wandb = wandb
@@ -77,6 +84,7 @@ class WandBWriter(BaseWriter):
             project=project or os.getenv("WANDB_PROJECT", "minwm"),
             name=run_name or os.getenv("WANDB_RUN_NAME"),
             dir=log_dir,
+            config=config,
         )
         logger.info("WandB logging enabled")
 
@@ -103,12 +111,13 @@ class WriterList(BaseWriter):
             writer.close()
 
 
-def _build_writers(cfg: Monitor, log_dir: str) -> WriterList:
+def _build_writers(cfg: Monitor, log_dir: str, run_config: dict | None = None) -> WriterList:
     """Construct the configured backend writers (main process only).
 
     Args:
         cfg (Monitor): the monitor config naming the backends.
         log_dir (str): base directory for backend output.
+        run_config (dict | None): run hyperparameters for backends that store them.
 
     Returns:
         WriterList: the fan-out container (empty when no backends configured).
@@ -118,7 +127,9 @@ def _build_writers(cfg: Monitor, log_dir: str) -> WriterList:
         if backend == "tensorboard":
             writers.append(TensorBoardWriter(log_dir))
         elif backend == "wandb":
-            writers.append(WandBWriter(log_dir, cfg.wandb_project, cfg.wandb_run_name))
+            writers.append(
+                WandBWriter(log_dir, cfg.wandb_project, cfg.wandb_run_name, config=run_config)
+            )
         else:
             raise ValueError(f"unknown monitor backend {backend!r}; valid: tensorboard, wandb")
     return WriterList(writers)
@@ -161,11 +172,14 @@ class MetricsProcessor:
     Args:
         cfg (Monitor): the monitor config (backends + W&B knobs).
         log_dir (str): base directory for backend output.
+        run_config (dict | None): run hyperparameters handed to backends that store
+            them (W&B run config).
     """
 
-    def __init__(self, cfg: Monitor, log_dir: str) -> None:
+    def __init__(self, cfg: Monitor, log_dir: str, run_config: dict | None = None) -> None:
         self._cfg = cfg
         self._log_dir = log_dir
+        self._run_config = run_config
         self._writers: WriterList | None = None
         self._mem = DeviceMemoryMonitor() if torch.cuda.is_available() else None
         self._t_last = time.perf_counter()
@@ -193,7 +207,7 @@ class MetricsProcessor:
         if not comm.is_main_process():
             return
         if self._writers is None:
-            self._writers = _build_writers(self._cfg, self._log_dir)
+            self._writers = _build_writers(self._cfg, self._log_dir, self._run_config)
 
         now = time.perf_counter()
         dt = now - self._t_last

@@ -16,7 +16,7 @@ dict. The split is by **extensibility**:
 Parse a loaded config (py/yaml dict) with :meth:`MWMConfig.from_dict`.
 """
 
-from dataclasses import dataclass, field, fields
+from dataclasses import dataclass, field, fields, is_dataclass
 from typing import Any
 
 from omegaconf import DictConfig, OmegaConf
@@ -288,6 +288,30 @@ class MWMConfig:
             recipe=OmegaConf.create(cfg.get("recipe", {})),
             auxiliary_models=OmegaConf.create(cfg.get("auxiliary_models", {})),
         )
+
+    def to_dict(self) -> dict:
+        """Plain nested ``dict`` of every section, the inverse of :meth:`from_dict`.
+
+        Fixed sections carry their defaults, so the result records every effective
+        setting; open sections hold only the keys the config set. Used to record a
+        run's hyperparameters (e.g. as the W&B run config).
+
+        Returns:
+            dict: nested builtin containers, with ``DictConfig`` nodes resolved.
+        """
+        return _to_plain(self)
+
+
+def _to_plain(value: Any) -> Any:
+    if is_dataclass(value):
+        return {f.name: _to_plain(getattr(value, f.name)) for f in fields(value)}
+    if OmegaConf.is_config(value):
+        return OmegaConf.to_container(value, resolve=True)
+    if isinstance(value, dict):
+        return {k: _to_plain(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return type(value)(_to_plain(v) for v in value)
+    return value
 
 
 def _strict(dc: type, node: dict) -> Any:

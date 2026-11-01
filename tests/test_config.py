@@ -542,3 +542,22 @@ def test_monitor_backends_list_coerces_to_tuple():
 def test_monitor_strict_rejects_typo():
     with pytest.raises(ValueError, match="backend"):
         MWMConfig.from_dict({"monitor": {"backend": ["wandb"]}})
+
+
+def test_to_dict_is_plain_and_roundtrips():
+    import json
+
+    cfg = MWMConfig.from_dict(
+        {
+            "training": {"max_steps": 3},
+            "data": {"dataset": {"type": "Mock", "length": 2}, "batch_size": 2},
+            "recipe": {"type": "ARTFRecipe", "optimizer": {"lr": 2e-6}},
+        }
+    )
+    out = cfg.to_dict()
+    json.dumps(out)
+    assert out["training"]["max_steps"] == 3
+    assert out["training"]["log_interval"] == 100  # defaults are recorded too
+    assert out["data"]["dataset"] == {"type": "Mock", "length": 2}
+    assert out["recipe"]["optimizer"]["lr"] == 2e-6
+    assert MWMConfig.from_dict(out) == cfg

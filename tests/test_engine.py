@@ -253,6 +253,40 @@ def test_metrics_processor_throughput_no_memory_on_cpu():
         assert not any(k.startswith("memory/") for k in merged)
 
 
+def test_wandb_run_config_records_hyperparams(fake_module, tmp_path, monkeypatch):
+    init_kwargs = {}
+    fake_wandb = types.ModuleType("wandb")
+    fake_wandb.run = None
+    fake_wandb.init = lambda **kw: init_kwargs.update(kw)
+    fake_wandb.log = lambda metrics, step: None
+    monkeypatch.setenv("SLURM_JOB_ID", "123")
+    cfg = {
+        "model": {"type": "minwm_test_fakes:TinyModel", "dim": 4},
+        "recipe": {"type": "minwm_test_fakes:TinyRecipe"},
+        "training": {"max_steps": 1, "log_interval": 1, "output_dir": str(tmp_path)},
+        "data": {"batch_size": 2},
+        "monitor": {"backends": ["wandb"]},
+    }
+
+    class T(BaseTrainer):
+        def build_dataloader(self, data_cfg):
+            return [torch.randn(2, 4)]
+
+    t = T(cfg)
+    # Install the fake only after the build: diffusers' import probes
+    # find_spec("wandb"), which rejects a module without a __spec__.
+    monkeypatch.setitem(sys.modules, "wandb", fake_wandb)
+    t.train()
+    t.close()
+
+    config = init_kwargs["config"]
+    assert config["model"]["dim"] == 4
+    assert config["training"]["max_steps"] == 1
+    assert config["runtime"]["world_size"] == 1
+    assert config["runtime"]["global_batch_size"] == 2
+    assert config["runtime"]["slurm_job_id"] == "123"
+
+
 # ---- checkpoint roundtrip ------------------------------------------------
 
 
