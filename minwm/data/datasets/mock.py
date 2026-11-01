@@ -24,6 +24,8 @@ class MockCameraLatentDataset(Dataset):
             ``[ode_steps, F, C, H, W]`` (most-noisy -> clean) instead of a single
             ``clean_latent``. Must be ``len(denoising_step_list) + 1`` for the ODE
             recipe.
+        with_disparity (bool): also emit ``disparity`` ``[F, 1, H, W]`` uniform in
+            ``[0, 1]``, the input :class:`~minwm.processors.DisparityChannel` expects.
         seed (int): base RNG seed (per-sample deterministic).
     """
 
@@ -36,6 +38,7 @@ class MockCameraLatentDataset(Dataset):
         width: int = 104,
         with_camera: bool = True,
         ode_steps: int = 0,
+        with_disparity: bool = False,
         seed: int = 0,
     ):
         self.length = length
@@ -43,6 +46,7 @@ class MockCameraLatentDataset(Dataset):
         self.num_frames = num_frames
         self.with_camera = with_camera
         self.ode_steps = ode_steps
+        self.with_disparity = with_disparity
         self.seed = seed
 
     def __len__(self) -> int:
@@ -60,6 +64,9 @@ class MockCameraLatentDataset(Dataset):
                 "prompts": f"mock prompt {idx}",
                 "clean_latent": torch.randn(*self.shape, generator=g),
             }
+        if self.with_disparity:
+            frames, _, height, width = self.shape
+            sample["disparity"] = torch.rand(frames, 1, height, width, generator=g)
         if self.with_camera:
             sample["viewmats"] = torch.eye(4).unsqueeze(0).repeat(self.num_frames, 1, 1)
             sample["Ks"] = torch.eye(3).unsqueeze(0).repeat(self.num_frames, 1, 1)

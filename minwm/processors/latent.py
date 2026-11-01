@@ -138,3 +138,41 @@ class LatentToDevice(BatchPreprocessor):
             if key in batch and batch[key] is not None:
                 batch[key] = batch[key].to(device=device, dtype=self.dtype)
         return batch
+
+
+class DisparityChannel(BatchPreprocessor):
+    """Append ``disparity`` to ``clean_latent`` as one extra channel, as ``scale·(2d − 1)``.
+
+    Reads ``disparity`` ``[B, F, 1, H, W]`` on the latent grid, with values ``d`` in
+    ``[0, 1]`` (1 = nearest), and writes ``clean_latent`` ``[B, F, C + 1, H, W]`` on
+    the latent's device and dtype. Place it after :class:`LatentToDevice` and before
+    :class:`~minwm.processors.flow.FlowNoise`, so the noise, the flow target and the
+    clean context all cover the new channel unchanged.
+
+    Args:
+        scale (float): disparity amplitude ``a``. ``2d − 1`` first maps ``[0, 1]`` to
+            ``[−1, 1]``; Wan latents are normalized to about unit std per channel.
+
+    Raises:
+        ValueError: if ``disparity`` is not ``[B, F, 1, H, W]`` matching the latent,
+            or has values outside ``[0, 1]`` (NaN included).
+    """
+
+    def __init__(self, scale: float = 1.0) -> None:
+        self.scale = scale
+
+    def __call__(self, batch: dict, device: torch.device) -> dict:
+        clean, disparity = batch["clean_latent"], batch["disparity"]
+        expected = (*clean.shape[:2], 1, *clean.shape[3:])
+        if tuple(disparity.shape) != expected:
+            raise ValueError(f"disparity must be {expected}, got {tuple(disparity.shape)}")
+        # NaN fails both comparisons, so this also rejects non-finite values.
+        bad = ~((disparity >= 0) & (disparity <= 1))
+        if bool(bad.any()):
+            raise ValueError(
+                f"disparity must be finite and lie in [0, 1]; {int(bad.sum())} of "
+                f"{bad.numel()} values do not"
+            )
+        channel = self.scale * (2 * disparity.float() - 1)
+        batch["clean_latent"] = torch.cat([clean, channel.to(clean)], dim=2)
+        return batch
