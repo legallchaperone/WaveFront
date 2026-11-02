@@ -33,6 +33,10 @@ class Training:
 
     max_steps: int = 0
     """Total optimization steps to run (the loop's stop condition)."""
+    grad_accum_steps: int = 1
+    """Micro-batches whose gradients are summed into one optimization step, so the
+    global batch is ``dp_size × data.batch_size × grad_accum_steps``. Only recipes
+    with ``supports_grad_accumulation`` accept more than 1."""
     log_interval: int = 100
     """Steps between metric logs; 0 disables logging."""
     ckpt_interval: int = 0

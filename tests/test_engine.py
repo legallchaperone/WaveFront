@@ -372,6 +372,79 @@ def test_evaluate_rejects_val_size_not_divisible_by_dp(fake_module, tmp_path, mo
         t.evaluate()
 
 
+# ---- gradient accumulation -----------------------------------------------
+
+
+def _accum_trainer(fake_module, out, batches, grad_accum_steps, recipe="AccumRecipe"):
+    class AccumRecipe(Recipe):
+        supports_grad_accumulation = True
+
+        def build_optimizers(self, model):
+            return {"main": torch.optim.SGD(model.parameters(), lr=0.1)}
+
+        def train_one_step(self, model, batch, optimizers, step, auxiliary_models=None):
+            loss = model(batch).pow(2).mean()
+            self.optimizer_step(loss, optimizers["main"], model.parameters())
+            return {"loss": loss.item()}
+
+    fake_module.AccumRecipe = AccumRecipe
+
+    class T(BaseTrainer):
+        def build_dataloader(self, data_cfg):
+            return batches
+
+    cfg = {
+        "model": {"type": "minwm_test_fakes:TinyModel", "dim": 4},
+        "recipe": {"type": f"minwm_test_fakes:{recipe}"},
+        "training": {
+            "max_steps": 1,
+            "log_interval": 1,
+            "output_dir": out,
+            "grad_accum_steps": grad_accum_steps,
+        },
+        "data": {"batch_size": len(batches[0])},
+    }
+    return T(cfg)
+
+
+def test_grad_accumulation_matches_one_big_batch(fake_module, tmp_path):
+    torch.manual_seed(0)
+    x = torch.randn(4, 4)
+    full = _accum_trainer(fake_module, str(tmp_path / "full"), [x], grad_accum_steps=1)
+    accum = _accum_trainer(fake_module, str(tmp_path / "acc"), [x[:2], x[2:]], grad_accum_steps=2)
+    accum.model.load_state_dict(full.model.state_dict())
+    logs = {}
+    for name, t in (("full", full), ("accum", accum)):
+        writer = _CaptureWriter()
+        t.metrics_processor._writers = writer
+        t.train()
+        logs[name] = writer.captured[-1][1]
+
+    torch.testing.assert_close(accum.model.lin.weight, full.model.lin.weight)
+    torch.testing.assert_close(accum.model.lin.bias, full.model.lin.bias)
+    # Equal-size micro-batches: the mean of their losses is the full-batch loss.
+    assert logs["accum"]["loss"] == pytest.approx(logs["full"]["loss"])
+    assert logs["accum"]["grad_norm"] == pytest.approx(logs["full"]["grad_norm"])
+    assert accum.step == 1
+    assert accum._run_config()["runtime"]["global_batch_size"] == 4
+
+
+def test_grad_accumulation_needs_recipe_support(fake_module, tmp_path):
+    batches = [torch.randn(2, 4)]
+    with pytest.raises(ValueError, match="does not support gradient accumulation"):
+        _accum_trainer(fake_module, str(tmp_path), batches, 2, recipe="TinyRecipe")
+    with pytest.raises(ValueError, match="grad_accum_steps must be >= 1"):
+        _accum_trainer(fake_module, str(tmp_path), batches, 0)
+
+
+def test_micro_step_rejects_bad_index(fake_module):
+    recipe = fake_module.TinyRecipe()
+    with pytest.raises(ValueError, match="not in"):
+        with recipe.micro_step(2, 2):
+            pass
+    assert recipe._micro_step == (0, 1)
+
+
 # ---- checkpoint roundtrip ------------------------------------------------
 
 

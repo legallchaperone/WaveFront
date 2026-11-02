@@ -159,6 +159,14 @@ class BaseTrainer:
         if self.cfg.training.activation_offload and not self._fsdp:
             logger.warning("activation offload requires FSDP2; no model was sharded")
         self.recipe: Recipe = self.build_recipe(self.cfg.recipe)
+        accum = self.cfg.training.grad_accum_steps
+        if accum < 1:
+            raise ValueError(f"training.grad_accum_steps must be >= 1, got {accum}")
+        if accum > 1 and not self.recipe.supports_grad_accumulation:
+            raise ValueError(
+                f"{type(self.recipe).__name__} does not support gradient accumulation "
+                f"(training.grad_accum_steps={accum})"
+            )
         if self._fsdp:
             from minwm.distributed.fsdp import resolve_dtype
 
@@ -186,7 +194,9 @@ class BaseTrainer:
         runtime = {
             "world_size": world_size,
             "dp_size": dp_size,
-            "global_batch_size": dp_size * self.cfg.data.batch_size,
+            "global_batch_size": (
+                dp_size * self.cfg.data.batch_size * self.cfg.training.grad_accum_steps
+            ),
             "num_samples": len(dataset) if hasattr(dataset, "__len__") else None,
             "slurm_job_id": os.environ.get("SLURM_JOB_ID"),
         }
@@ -607,6 +617,37 @@ class BaseTrainer:
 
     # ---- loop ------------------------------------------------------------
 
+    def _run_micro_batches(self, total: int) -> None:
+        """Run one optimization step as ``total`` micro-batches; log each scalar's mean.
+
+        Each micro-batch's scalars are collected separately, then every scalar is
+        averaged over the micro-batches that recorded it. ``grad_norm`` is recorded
+        only by the last one, so it is logged as is; ``time/*`` become per-micro-batch
+        means. Scalars from earlier steps that this step did not record are kept.
+        """
+        kept = self.storage.latest()
+        per_micro = []
+        for index in range(total):
+            self.storage.clear()
+            t0 = time.perf_counter()
+            batch = self._next_batch()
+            self.storage.put_scalar("time/data(ms)", 1000 * (time.perf_counter() - t0))
+            with self.recipe.micro_step(index, total):
+                metrics = self.recipe.train_one_step(
+                    self.model,
+                    batch,
+                    self.optimizers,
+                    self.step,
+                    auxiliary_models=self.auxiliary_models,
+                )
+            self.storage.put_scalars(**metrics)
+            per_micro.append(self.storage.latest())
+        self.storage.clear()
+        self.storage.put_scalars(**kept)
+        for name in {key for scalars in per_micro for key in scalars}:
+            values = [scalars[name] for scalars in per_micro if name in scalars]
+            self.storage.put_scalar(name, sum(values) / len(values))
+
     def _next_batch(self) -> Any:
         if self._data_iter is None:
             self._data_iter = iter(self.dataloader)
@@ -661,23 +702,13 @@ class BaseTrainer:
                         nvtx_ctx.__exit__(None, None, None)
                         self.storage.nvtx_enabled = False
                         nvtx_ctx = None
-                    t0 = time.perf_counter()
-                    batch = self._next_batch()
-                    self.storage.put_scalar("time/data(ms)", 1000 * (time.perf_counter() - t0))
                     nvtx_range = (
                         torch.cuda.nvtx.range("train_step")
                         if self.storage.nvtx_enabled
                         else nullcontext()
                     )
                     with nvtx_range:
-                        metrics = self.recipe.train_one_step(
-                            self.model,
-                            batch,
-                            self.optimizers,
-                            self.step,
-                            auxiliary_models=self.auxiliary_models,
-                        )
-                    self.storage.put_scalars(**metrics)
+                        self._run_micro_batches(training.grad_accum_steps)
                     self.step += 1
 
                     if training.log_interval and self.step % training.log_interval == 0:

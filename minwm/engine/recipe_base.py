@@ -22,8 +22,8 @@ configs reference the concrete recipe modules under ``minwm.engine.training.reci
 """
 
 from abc import ABC
-from contextlib import AbstractContextManager, nullcontext
-from typing import Any
+from contextlib import AbstractContextManager, contextmanager, nullcontext
+from typing import Any, Iterator
 
 import torch
 from torch import nn
@@ -135,7 +135,16 @@ class Recipe(ABC):
     All model-facing config (text dims, working dtype) lives on the
     :attr:`adapter`; the recipe reads the model's working precision back through
     the :attr:`dtype` property rather than owning a copy.
+
+    Gradient accumulation (``training.grad_accum_steps``) is opt-in through
+    :attr:`supports_grad_accumulation`: the trainer runs :meth:`train_one_step`
+    once per micro-batch inside :meth:`micro_step`, and :meth:`optimizer_step`
+    steps only on the last one. A recipe qualifies when each ``train_one_step``
+    makes exactly one :meth:`optimizer_step` call and nothing after it depends on
+    the step having happened (no EMA update, no second optimizer).
     """
+
+    supports_grad_accumulation: bool = False
 
     def __init__(
         self,
@@ -182,6 +191,7 @@ class Recipe(ABC):
         self.max_grad_norm = max_grad_norm
         self.skip_grad_norm = skip_grad_norm
         self.batch_preprocessors: list | None = None
+        self._micro_step = (0, 1)
 
     @property
     def dtype(self) -> torch.dtype:
@@ -269,6 +279,25 @@ class Recipe(ABC):
             batch = preprocessor(batch, device)
         return batch
 
+    @contextmanager
+    def micro_step(self, index: int, total: int) -> Iterator[None]:
+        """Mark the enclosed :meth:`train_one_step` as micro-batch ``index`` of ``total``.
+
+        Args:
+            index (int): position of this micro-batch in the optimization step.
+            total (int): micro-batches per optimization step.
+
+        Raises:
+            ValueError: if ``index`` is not in ``[0, total)``.
+        """
+        if not 0 <= index < total:
+            raise ValueError(f"micro-batch index {index} is not in [0, {total})")
+        self._micro_step = (index, total)
+        try:
+            yield
+        finally:
+            self._micro_step = (0, 1)
+
     def optimizer_step(
         self,
         loss: torch.Tensor,
@@ -297,13 +326,22 @@ class Recipe(ABC):
                 skipped, each rank logs a per-field summary of it next to the
                 skip report, to pin down which samples drove the grad spike.
 
+        Inside :meth:`micro_step` the loss is divided by the number of micro-batches
+        and gradients accumulate: they are zeroed only before the first micro-batch,
+        and clipping and the optimizer step happen only after the last one.
+
         Returns:
-            bool: True if the optimizer stepped, False if the step was skipped.
+            bool: True if the optimizer stepped; False if the step was skipped or
+            this micro-batch only accumulated gradients.
         """
         params = list(params)
-        optimizer.zero_grad()
+        index, total = self._micro_step
+        if index == 0:
+            optimizer.zero_grad()
         with record_time(backward_name):
-            loss.backward()
+            (loss / total).backward()
+        if index < total - 1:
+            return False
 
         # Measure first (no clipping) so the skip decision sees the true norm.
         # clip_grad_norm_(inf) normally leaves grads untouched, but on a non-finite

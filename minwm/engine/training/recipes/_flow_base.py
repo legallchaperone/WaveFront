@@ -106,6 +106,7 @@ class SingleForwardFlowRecipe(FlowMatchingRecipeBase):
     """
 
     SHARED_INPUT_KEYS = ("noisy", "timestep", "clean", "aug_t", "viewmats", "Ks")
+    supports_grad_accumulation = True
 
     def __init__(
         self,
