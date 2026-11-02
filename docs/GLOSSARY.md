@@ -24,7 +24,8 @@
 ## 1. 基本单位
 
 - **像素帧 / latent 帧**：视频的原始帧 / Wan VAE 压缩后的帧。F 个 latent 帧解码为 1+4(F−1) 个像素帧：第 0 个 latent 帧对应 1 个像素帧，之后每个对应 4 个。
-- **token**：DiT 的处理单位，即一个 latent 帧上 2×2 的 patch，覆盖 16×16 像素 ×（1 或 4）个像素帧。480×832 下每个 latent 帧有 30×52 = 1560 个 token。
+- **latent 格**：latent 网格上的一个位置。480×832 的帧压成 60×104 个 latent 格，每个覆盖 8×8 像素，RGB 在每格有 16 个通道。
+- **token**：DiT 的处理单位，即一个 latent 帧上 2×2 的 patch（2×2 个 latent 格），覆盖 16×16 像素 ×（1 或 4）个像素帧。480×832 下每个 latent 帧有 30×52 = 1560 个 token。
 - **chunk**（代码名 `chunk`；minWM 中叫 `block`）：4 个 latent 帧，共 6240 个 token。模型逐 chunk 自回归生成，chunk 之间 causal。
 - **当前 chunk / 历史 chunk**：正在生成的 chunk / 已经生成、KV 已写入 cache 的 chunk。深度调度只作用于当前 chunk。
 - **DiT 层**（minWM 中为 `model.blocks`）：transformer block。Wan 2.1 1.3B 有 30 个。
@@ -43,15 +44,16 @@
 
 ## 3. 深度与分层
 
-- **disparity d**（代码名 `disparity`）：1/深度，经因果归一化到 [0,1]，再取 γ 次幂（默认 γ=1，即不变）。1 最近，0 无穷远。分层、disparity 通道、d_plane 都用这个值（4.2）。
-- **因果归一化**：只缩放、不平移。第一个 chunk 内有效像素（不含天空和无效值）disparity 的 90% 分位数映射到 0.9，后续 chunk 沿用同一个缩放系数并截断到 [0,1]（6.2）。不平移，是为了让无穷远仍是 0、位移仍正比于 disparity；不按整段视频归一化，因为那样会用到推理时还没生成的内容。
-- **高分位聚合**：token 的 disparity 取它覆盖的像素上 disparity 的高分位数（初值 90%），偏向近处（6.2）。
-- **disparity 幂次 γ**（代码名 `disp_gamma`）：d 是归一化 disparity 的 γ 次幂，分层在 d 上等距。γ=1（默认）就是在 disparity 上等距；γ=0.5 即开平方根，把接近 0 的远处拉开、近层和中层变大，代价是每层覆盖的 disparity 范围不再相等。按层统计再定（4.2、6.3）。
-- **深度层（层）**（代码名 `depth_layer`）：当前 chunk 内按 d 等距分成 K 层（γ=1 时即按 disparity 等距）。第 ℓ 层覆盖 (1−(ℓ+1)/K, 1−ℓ/K]，最后一层包含 0（4.2）。
+- **disparity d**（代码名 `disparity`）：1/深度，经因果归一化到 [0,1]。1 最近，0 无穷远。天空不特殊处理，自然接近 0。disparity 通道的输入输出和 loss 用 d 本身；分层、层值和 d_plane 用 d^γ（4.2）。
+- **稠密 disparity**：2 像素网格上的 d（480×832 下为 240×416），每个 token 覆盖 64 个值，与它的 RGB 数值个数相同（4.3、6.2）。
+- **因果归一化**：只缩放、不平移。第一个 chunk 内 disparity 的 90% 分位数（不排除天空）映射到 0.9，后续 chunk 沿用同一个缩放系数并截断到 [0,1]（6.2）。不平移，是为了让无穷远仍是 0、位移仍正比于 disparity；不按整段视频归一化，因为那样会用到推理时还没生成的内容。
+- **高分位聚合**：取一组 disparity 的高分位数（初值 90%），偏向近处。用在两处：每 2×2 像素聚合成稠密 disparity（6.2）；token 的 d 取它 64 个稠密值的高分位数（4.3）。只取实际存在的样本值，不插值，否则遮挡边界上会出现中间值。
+- **disparity 幂次 γ**（代码名 `disp_gamma`）：只用于分层，分层在 d^γ 上等距；网络的输入输出不受 γ 影响。γ=1（默认）就是在 disparity 上等距；γ=0.5 即开平方根，把接近 0 的远处拉开、近层和中层变大，代价是每层覆盖的 disparity 范围不再相等。按层统计再定（4.2、6.3）。
+- **深度层（层）**（代码名 `depth_layer`）：当前 chunk 内按 d^γ 等距分成 K 层（γ=1 时即按 disparity 等距）。第 ℓ 层覆盖 d^γ ∈ (1−(ℓ+1)/K, 1−ℓ/K]，最后一层包含 0（4.2）。
 - **层数 K**（代码名 `num_depth_layers`）：分几层。训练时每个 chunk 从 {2, 3, 4, 6, 8} 采。不要叫 `num_layers`，那会和 DiT 层数冲突。
 - **层号 ℓ**（代码名 `layer_idx`）：0 是最近的一层。
 - **层值 q_ℓ**（代码名 `layer_value`）：第 ℓ 层的上沿，q_ℓ = 1 − ℓ/K。例如 K=4 时依次是 1、0.75、0.5、0.25。
-- **d̂_i**（代码名 `disparity_pred`）：模型当前对 token i 的 disparity 预测，由 disparity 通道的输出换算成干净值。
+- **d̂_i**（代码名 `disparity_pred`）：模型当前对 token i 的 disparity 预测：disparity 通道的输出换算成干净值，再对 token 的 64 个值做高分位聚合。
 - **层归属**：一个 token 属于哪一层。训练时按伪深度真值；推理时按 d̂_i，每个去噪步更新（4.4）。
 - **空层**：当前没有 token 的层。严格逐层时跳过。
 - **前沿层**（代码名 `front_layer`）：按扫描方向最先、尚未提交、且非空的那一层。
@@ -91,9 +93,10 @@
 
 ## 7. disparity 通道
 
-- **disparity 通道**（代码名 `disp_embed`、`disp_head`）：每个 token 在 RGB latent 旁带一个 disparity 标量，与颜色联合去噪，共用 σ_i。`disp_embed: Linear(1→1536)` 加到 patch embedding 输出上；`disp_head: Linear(1536→1)` 接在输出头的调制特征上。两者都零初始化（4.3）。
+- **disparity 通道**（代码名 `disp_embed`、`disp_head`）：每个 token 在 RGB latent 旁带 64 个稠密 disparity 值，与颜色联合去噪，共用 σ_i。经 pixel unshuffle 成 16 个通道后，`disp_embed: Conv3d(16→1536, 1×2×2)` 加到 patch embedding 输出上；`disp_head: Linear(1536→64)` 接在输出头的调制特征上。两者都零初始化（4.3）。
+- **pixel unshuffle**（space-to-depth；代码 `disparity_to_channels`，逆为 `disparity_from_channels`，因子 `DISP_UNSHUFFLE`=4、通道数 `DISP_CHANNELS`=16，都在 `minwm/processors/latent.py`）：把每个 latent 格内 4×4 个稠密 disparity 值搬到通道维，得到与 RGB latent 同为 60×104 的 16 个通道；pixel shuffle 是它的逆（4.3）。
 - **d̃**：送进网络的 disparity，d̃ = a·(2d − 1)。分层仍用 [0,1] 的 d。
-- **a（disparity 缩放）**（代码名 `disp_scale`）：决定深度比颜色早多少成形。默认 2，理由是让 disparity 通道和 RGB latent 的幅度相当；先看 disparity 随噪声的曲线，再决定要不要用短 run 试 1 或 4；改了 γ 要重新看；不可学习（4.3）。
+- **a（disparity 缩放）**（代码名 `disp_scale`）：决定深度比颜色早多少成形。取 1/std(2d−1)，取到 0.5 的倍数（group_0001 实测 1.55，取 1.5），让 disparity 通道和 RGB latent 每个元素的幅度相当；先看 disparity 随噪声的曲线，再决定要不要用短 run 试 a/2 或 2a；② 和 ③ 用同一个值；不可学习（4.3）。
 - **σ_eff**：缩放后深度通道的等效噪声，满足 (1−σ_eff)/σ_eff = a·(1−σ)/σ。例如 a=2、σ=0.5 时 σ_eff≈0.33。
 - **λ**（代码名 `disp_loss_weight`）：disparity 那一项 loss 的权重。先定 a，再调 λ。
 
