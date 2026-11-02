@@ -2,17 +2,20 @@
 
 Continues the Wan Action2V Stage 1 checkpoint (released as ``ar_diffusion_tf``,
 linked as ``stage1_ar_tf``) with the choices in ``docs/ai-generated/decisions.md``:
-disparity rides as a 17th latent channel (``use_disparity``), fed as ``a·(2d − 1)``
-with ``a = 1`` by ``DisparityChannel`` and trained with ``JointFlowMatchingLoss``
-(λ = 1). Noise stays uniform within each AR chunk (s = 0). Optimizer, learning rate
-and batch size come from the Stage 1 config, so baseline 1 can match them.
+dense disparity rides as 16 pixel-unshuffled channels after the 16 latent channels
+(``use_disparity``), fed as ``a·(2d − 1)`` by ``DisparityChannel`` and trained with
+``JointFlowMatchingLoss`` (λ = 1). ``a = 1`` is set only as ``model.disparity_scale``;
+``DisparityChannel``, the validation ``disp_err`` and inference all read it from there.
+Noise stays uniform within each AR chunk (s = 0). Optimizer, learning rate and batch
+size come from the Stage 1 config, so baseline 1 can match them.
 
 The Stage 1 checkpoint has no disparity branch; ``load_model_weights`` fills it
 with zeros, so the run starts from Stage 1's exact latent predictions.
 
-Data: the LMDB samples must also carry ``disparity`` ``[F, 1, H, W]`` in ``[0, 1]``
-on the latent grid. The SpatialVID preprocessing that writes it, and the dataset
-that reads it, are not in the repo yet; until then use ``b2_joint_depth_mock.py``.
+Data: the LMDB samples must also carry ``disparity`` ``[F, 1, 4H, 4W]`` in ``[0, 1]``
+on the 2-pixel grid (4× the latent grid per side). The SpatialVID preprocessing that
+writes it, and the dataset that reads it, are not in the repo yet; until then use
+``b2_joint_depth_mock.py``.
 
     torchrun --nproc_per_node=4 tools/train_mwm.py \
         --config-file configs/wan21/wavefront/train/b2_joint_depth.py \
@@ -35,13 +38,13 @@ training = dict(
 
 checkpoint = dict(pretrained=_STAGE1)
 
-model = dict(use_disparity=True)
+model = dict(use_disparity=True, disparity_scale=1.0)
 
 recipe = dict(
     loss=dict(type="JointFlowMatchingLoss", disp_weight=1.0),
     batch_preprocessors=[
         dict(type="LatentToDevice"),
-        dict(type="DisparityChannel", scale=1.0),
+        dict(type="DisparityChannel"),
         dict(type="FlowNoise", uniform_across_frames=False, num_frame_per_block=4),
         dict(type="CleanContextNoiseAug", max_timestep=0),
     ],

@@ -20,6 +20,7 @@ from minwm.distributed.collective import sp_all_gather
 from minwm.distributed.parallel_dims import get_parallel_state
 from minwm.modeling.wan21.layers.norm import WanLayerNorm
 from minwm.modeling.wan21.layers.rope import rope_params, sinusoidal_embedding_1d
+from minwm.processors import DISP_CHANNELS
 
 from .blocks import CausalWanAttentionBlock
 from .model import MLPProj
@@ -42,7 +43,8 @@ class CausalHead(nn.Module):
         patch_size (tuple): 3-D patch size ``(T, H, W)``.
         eps (float): LayerNorm epsilon.
         disp_dim (int): extra output channels predicted by ``disp_head`` from the same
-            modulated features (``0`` = no disparity output).
+            modulated features (``0`` = no disparity output; ``DISP_CHANNELS`` with
+            ``use_disparity``).
     """
 
     def __init__(
@@ -106,14 +108,20 @@ class CausalWan21Model(ModelMixin, ConfigMixin):
             ``from_pretrained`` round-trips the camera params.
         num_frame_per_block (int): latent frames grouped into one causal attention
             chunk (the AR block size). ``1`` = pure frame-causal; stage 1 sets ``4``.
-        use_disparity (bool): denoise a disparity map jointly with the latents. Inputs
-            carry it as one channel after the ``in_dim`` latent channels (embedded by
-            ``disp_embed``); outputs carry it after the ``out_dim`` channels (from
-            ``head.disp_head``). Both are zero-init, so a checkpoint without them
+        use_disparity (bool): denoise dense disparity jointly with the latents. Inputs
+            carry it as ``DISP_CHANNELS`` pixel-unshuffled channels after the ``in_dim``
+            latent channels (embedded by ``disp_embed``); outputs carry the same
+            ``DISP_CHANNELS`` channels, in the same layout, after the ``out_dim`` channels
+            (from ``head.disp_head``). Both are zero-init, so a checkpoint without them
             behaves exactly as before. t2v only.
+        disparity_scale (float, optional): the disparity amplitude ``a``; the network
+            sees disparity as ``a·(2d − 1)``. The one place ``a`` is set: training's
+            :class:`~minwm.processors.DisparityChannel` and the inference loop read it
+            from here. Required with ``use_disparity``.
 
     Raises:
-        ValueError: if ``use_disparity`` is set for an ``i2v`` model.
+        ValueError: if ``use_disparity`` is set for an ``i2v`` model, or without
+            ``disparity_scale``.
     """
 
     ignore_for_config = ["patch_size", "cross_attn_norm", "qk_norm", "text_dim"]
@@ -143,11 +151,14 @@ class CausalWan21Model(ModelMixin, ConfigMixin):
         use_prope: bool = False,
         num_frame_per_block: int = 1,
         use_disparity: bool = False,
+        disparity_scale: float | None = None,
     ):
         super().__init__()
         assert model_type in ("t2v", "i2v")
         if use_disparity and model_type != "t2v":
             raise ValueError("use_disparity supports model_type='t2v' only")
+        if use_disparity and disparity_scale is None:
+            raise ValueError("use_disparity needs disparity_scale, the amplitude a in a·(2d − 1)")
         self.model_type = model_type
         self.patch_size = patch_size
         self.text_len = text_len
@@ -165,10 +176,13 @@ class CausalWan21Model(ModelMixin, ConfigMixin):
         self.eps = eps
         self.use_prope = use_prope
         self.use_disparity = use_disparity
+        self.disparity_scale = disparity_scale
 
         self.patch_embedding = nn.Conv3d(in_dim, dim, kernel_size=patch_size, stride=patch_size)
         self.disp_embed = (
-            nn.Conv3d(1, dim, kernel_size=patch_size, stride=patch_size) if use_disparity else None
+            nn.Conv3d(DISP_CHANNELS, dim, kernel_size=patch_size, stride=patch_size)
+            if use_disparity
+            else None
         )
         self.text_embedding = nn.Sequential(
             nn.Linear(text_dim, dim), nn.GELU(approximate="tanh"), nn.Linear(dim, dim)
@@ -196,7 +210,9 @@ class CausalWan21Model(ModelMixin, ConfigMixin):
                 for _ in range(num_layers)
             ]
         )
-        self.head = CausalHead(dim, out_dim, patch_size, eps, disp_dim=1 if use_disparity else 0)
+        self.head = CausalHead(
+            dim, out_dim, patch_size, eps, disp_dim=DISP_CHANNELS if use_disparity else 0
+        )
 
         assert (dim % num_heads) == 0 and (dim // num_heads) % 2 == 0
         d = dim // num_heads
@@ -815,7 +831,7 @@ class CausalWan21Model(ModelMixin, ConfigMixin):
         ]
 
     def _patch_embed(self, x: torch.Tensor) -> torch.Tensor:
-        """Patch-embed ``[1, C, F, H, W]``; with ``use_disparity`` the last channel is disparity."""
+        """Patch-embed ``[1, C, F, H, W]``; channels after ``in_dim`` go through ``disp_embed``."""
         if self.disp_embed is None:
             return self.patch_embedding(x)
         return self.patch_embedding(x[:, : self.in_dim]) + self.disp_embed(x[:, self.in_dim :])
@@ -825,7 +841,7 @@ class CausalWan21Model(ModelMixin, ConfigMixin):
 
         Args:
             x (Tensor): patch tokens, shape ``[B, L, C_out * prod(patch_size)]``; ``C_out``
-                is ``out_dim``, plus one with ``use_disparity``.
+                is ``out_dim``, plus ``DISP_CHANNELS`` with ``use_disparity``.
             grid_sizes (Tensor): ``(F, H, W)`` per sample, shape ``[B, 3]``.
 
         Returns:

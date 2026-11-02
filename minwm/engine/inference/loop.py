@@ -6,6 +6,8 @@ import torch
 import torch.nn as nn
 from torch import Tensor
 
+from minwm.processors import DISP_CHANNELS, disparity_from_channels
+
 from .samplers import CMSolver, EulerSolver, UniPCSolver
 
 
@@ -168,6 +170,9 @@ class ARGenerationLoop:
         context_noise (int): timestep for the per-block cache-refresh pass.
         offload_before_decode (bool): move the generator to CPU before the VAE
             decode (HunyuanVideo's temporal-only VAE needs the card to itself).
+
+    Raises:
+        ValueError: if the generator has ``use_disparity`` but no ``disparity_scale``.
     """
 
     def __init__(
@@ -181,6 +186,13 @@ class ARGenerationLoop:
         context_noise: int = 0,
         offload_before_decode: bool = False,
     ) -> None:
+        if getattr(generator, "use_disparity", False) and (
+            getattr(generator, "disparity_scale", None) is None
+        ):
+            raise ValueError(
+                "a use_disparity generator needs disparity_scale (model.disparity_scale), "
+                "the amplitude a it was trained with"
+            )
         self.generator = generator
         self.vae = vae
         self.adapter = adapter
@@ -234,8 +246,10 @@ class ARGenerationLoop:
         / ``Ks`` / ``action``.
 
         Returns ``latents`` (and ``video`` with a VAE). For a ``use_disparity``
-        generator the last channel is split off as ``disparity`` ``[B,F,1,H,W]``, in
-        the model's ``a·(2d − 1)`` units, so only the latents reach the VAE.
+        generator the last ``DISP_CHANNELS`` channels are split off, so only the
+        latents reach the VAE, and returned as dense ``disparity`` ``[B,F,1,4H,4W]``
+        in ``d`` units: pixel-shuffled back, then ``d = clamp((x / a + 1) / 2, 0, 1)``
+        with ``a`` the generator's ``disparity_scale``, in float32.
         """
 
         noise: Tensor = batch["noise"]
@@ -389,7 +403,13 @@ class ARGenerationLoop:
 
         out: dict = {"latents": output}
         if getattr(self.generator, "use_disparity", False):
-            out = {"latents": output[:, :, :-1], "disparity": output[:, :, -1:]}
+            channels = output[:, :, -DISP_CHANNELS:].float()
+            scale = self.generator.disparity_scale
+            disparity = (disparity_from_channels(channels) / scale + 1) / 2
+            out = {
+                "latents": output[:, :, :-DISP_CHANNELS],
+                "disparity": disparity.clamp(0, 1),
+            }
         if self.vae is not None:
             # HY's VAE decode runs a temporal conv3d over the full window and only
             # tiles spatially, so a busy card can OOM with the generator resident.

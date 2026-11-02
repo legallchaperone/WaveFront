@@ -21,7 +21,13 @@ from minwm.engine.inference.samplers import (
 )
 from minwm.modeling.wan21.adapter import Wan21Adapter
 from minwm.modeling.wan21.causal import CausalWan21Model
-from minwm.processors import CameraTrajectory, InferenceRuntime, LatentNoise
+from minwm.processors import (
+    DISP_CHANNELS,
+    CameraTrajectory,
+    InferenceRuntime,
+    LatentNoise,
+    disparity_to_channels,
+)
 from minwm.processors.camera import make_camera_tensors, parse_trajectory
 from minwm.sampling.schedulers import FlowMatchingScheduler
 
@@ -134,13 +140,17 @@ class _TinyCachedCausal(torch.nn.Module):
 
 
 def _build_pipeline(
-    use_prope: bool = False, num_frame_per_block: int = 1, use_disparity: bool = False
+    use_prope: bool = False,
+    num_frame_per_block: int = 1,
+    use_disparity: bool = False,
+    disparity_scale: float | None = None,
 ):
     gen = CausalWan21Model(
         **_ARCH,
         use_prope=use_prope,
         num_frame_per_block=num_frame_per_block,
         use_disparity=use_disparity,
+        disparity_scale=disparity_scale,
     ).eval()
     scheduler = FlowMatchingScheduler(num_train_timesteps=1000, shift=5.0)
     adapter = Wan21Adapter(
@@ -522,9 +532,56 @@ class TestPipelineForward:
                 return super().decode(zs)
 
         torch.manual_seed(0)
-        pipe = _build_pipeline(use_disparity=True)
+        pipe = _build_pipeline(use_disparity=True, disparity_scale=0.5)
         pipe.vae = _SixteenChannelVAE()
-        out = pipe.generate({"noise": torch.randn(1, 3, 17, 8, 8), "prompts": ["depth"]})
+        noise = torch.randn(1, 3, 16 + DISP_CHANNELS, 8, 8)
+        out = pipe.generate({"noise": noise, "prompts": ["depth"]})
         assert out["latents"].shape == (1, 3, 16, 8, 8)
-        assert out["disparity"].shape == (1, 3, 1, 8, 8)
+        assert out["disparity"].shape == (1, 3, 1, 32, 32)
+        assert bool(((out["disparity"] >= 0) & (out["disparity"] <= 1)).all())
         assert torch.isfinite(out["video"]).all()
+
+    def test_disparity_is_returned_as_dense_d(self):
+        """Disparity channels ``disparity_to_channels(a·(2d − 1))`` come back as ``d``."""
+
+        class _FixedOutput:
+            """A sampler whose denoised blocks are a known clip, block by block."""
+
+            def __init__(self, clip):
+                self.clip, self.start = clip, 0
+
+            def step(self, *, num_frames, **_):
+                block = self.clip[:, self.start : self.start + num_frames]
+                self.start += num_frames
+                return block
+
+        scale = 0.5
+        torch.manual_seed(0)
+        raw = torch.rand(1, 3, 1, 32, 32) * 2 - 0.5  # some values outside [0, 1]
+        latents = torch.randn(1, 3, 16, 8, 8)
+        clip = torch.cat([latents, disparity_to_channels(scale * (2 * raw - 1))], dim=2)
+        pipe = _build_pipeline(use_disparity=True, disparity_scale=scale)
+        pipe.sampler = _FixedOutput(clip)
+
+        out = pipe.generate({"noise": torch.randn_like(clip), "prompts": ["depth"]})
+
+        assert torch.equal(out["latents"], latents)
+        assert out["disparity"].dtype == torch.float32
+        torch.testing.assert_close(out["disparity"], raw.clamp(0, 1))
+
+    def test_disparity_generator_requires_its_scale(self):
+        built = _build_pipeline(use_disparity=True, disparity_scale=0.5)
+        built.generator.disparity_scale = None
+        with pytest.raises(ValueError, match="disparity_scale"):
+            ARGenerationLoop(
+                generator=built.generator,
+                vae=None,
+                adapter=built.adapter,
+                sampler=built.sampler,
+            )
+
+    def test_inference_config_has_no_second_disparity_scale(self):
+        from minwm.config.schema import parse_inference
+
+        with pytest.raises(ValueError, match="disparity_scale"):
+            parse_inference({"disparity_scale": 0.5})

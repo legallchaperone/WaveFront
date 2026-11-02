@@ -2,6 +2,8 @@
 
 import numpy as np
 import torch
+import torch.nn.functional as F
+from torch import Tensor
 
 from .base import BatchPreprocessor, InferenceInputPreprocessor, InferenceRuntime
 
@@ -140,30 +142,98 @@ class LatentToDevice(BatchPreprocessor):
         return batch
 
 
-class DisparityChannel(BatchPreprocessor):
-    """Append ``disparity`` to ``clean_latent`` as one extra channel, as ``scale·(2d − 1)``.
+DISP_UNSHUFFLE = 4
+DISP_CHANNELS = DISP_UNSHUFFLE**2
 
-    Reads ``disparity`` ``[B, F, 1, H, W]`` on the latent grid, with values ``d`` in
-    ``[0, 1]`` (1 = nearest), and writes ``clean_latent`` ``[B, F, C + 1, H, W]`` on
-    the latent's device and dtype. Place it after :class:`LatentToDevice` and before
-    :class:`~minwm.processors.flow.FlowNoise`, so the noise, the flow target and the
-    clean context all cover the new channel unchanged.
+
+def disparity_to_channels(disparity: Tensor) -> Tensor:
+    """Pixel-unshuffle dense disparity onto the latent grid.
 
     Args:
-        scale (float): disparity amplitude ``a``. ``2d − 1`` first maps ``[0, 1]`` to
-            ``[−1, 1]``; Wan latents are normalized to about unit std per channel.
+        disparity (Tensor): ``[..., 1, H * DISP_UNSHUFFLE, W * DISP_UNSHUFFLE]``.
+
+    Returns:
+        Tensor: ``[..., DISP_CHANNELS, H, W]``; the value at pixel ``(4h + i, 4w + j)``
+        lands at channel ``i * 4 + j`` of latent cell ``(h, w)``. Values are unchanged.
+    """
+    return F.pixel_unshuffle(disparity, DISP_UNSHUFFLE)
+
+
+def disparity_from_channels(channels: Tensor) -> Tensor:
+    """Pixel-shuffle disparity channels back to dense disparity.
+
+    The exact inverse of :func:`disparity_to_channels`.
+
+    Args:
+        channels (Tensor): ``[..., DISP_CHANNELS, H, W]``.
+
+    Returns:
+        Tensor: ``[..., 1, H * DISP_UNSHUFFLE, W * DISP_UNSHUFFLE]``, values unchanged.
 
     Raises:
-        ValueError: if ``disparity`` is not ``[B, F, 1, H, W]`` matching the latent,
-            or has values outside ``[0, 1]`` (NaN included).
+        ValueError: if the channel dim is not ``DISP_CHANNELS``.
+    """
+    if channels.ndim < 3 or channels.shape[-3] != DISP_CHANNELS:
+        raise ValueError(
+            f"expected {DISP_CHANNELS} disparity channels at dim -3, got {tuple(channels.shape)}"
+        )
+    return F.pixel_shuffle(channels, DISP_UNSHUFFLE)
+
+
+class DisparityChannel(BatchPreprocessor):
+    """Append dense ``disparity`` to ``clean_latent`` as ``DISP_CHANNELS`` extra channels.
+
+    Reads ``disparity`` ``[B, F, 1, 4H, 4W]`` (dense disparity, 4× the latent grid per
+    side), with values ``d`` in ``[0, 1]`` (1 = nearest), maps it to ``scale·(2d − 1)``,
+    pixel-unshuffles it by :data:`DISP_UNSHUFFLE` (see :func:`disparity_to_channels`) and
+    writes ``clean_latent`` ``[B, F, C + DISP_CHANNELS, H, W]`` on the latent's device and
+    dtype, disparity channels after the latent channels. Place it after
+    :class:`LatentToDevice` and before :class:`~minwm.processors.flow.FlowNoise`, so the
+    noise, the flow target and the clean context all cover the new channels unchanged.
+
+    Args:
+        scale (float, optional): disparity amplitude ``a``. ``2d − 1`` first maps
+            ``[0, 1]`` to ``[−1, 1]``; Wan latents are normalized to about unit std per
+            channel. Leave it ``None``: ``a`` is set once, as the model's
+            ``disparity_scale``, and bound here by :meth:`resolve_scale`.
+
+    Raises:
+        ValueError: if ``scale`` is still unresolved, if ``disparity`` is not
+            ``[B, F, 1, 4H, 4W]`` for a ``[B, F, C, H, W]`` latent, or if it has values
+            outside ``[0, 1]`` (NaN included).
     """
 
-    def __init__(self, scale: float = 1.0) -> None:
+    def __init__(self, scale: float | None = None) -> None:
         self.scale = scale
 
+    def resolve_scale(self, model_scale: float | None) -> None:
+        """Bind ``scale`` to the model's ``disparity_scale``.
+
+        Args:
+            model_scale (float | None): the model's ``disparity_scale``.
+
+        Raises:
+            ValueError: if ``model_scale`` is ``None``, or ``scale`` was set explicitly
+                to a different value.
+        """
+        if model_scale is None:
+            raise ValueError("DisparityChannel needs a model with disparity_scale set")
+        if self.scale is not None and self.scale != model_scale:
+            raise ValueError(
+                f"DisparityChannel scale={self.scale} differs from the model's "
+                f"disparity_scale={model_scale}; set a only on the model"
+            )
+        self.scale = model_scale
+
     def __call__(self, batch: dict, device: torch.device) -> dict:
+        if self.scale is None:
+            raise ValueError(
+                "DisparityChannel scale is unresolved; the recipe binds it from the model's "
+                "disparity_scale (see resolve_scale)"
+            )
         clean, disparity = batch["clean_latent"], batch["disparity"]
-        expected = (*clean.shape[:2], 1, *clean.shape[3:])
+        height, width = clean.shape[3:]
+        expected = (*clean.shape[:2], 1, height * DISP_UNSHUFFLE, width * DISP_UNSHUFFLE)
         if tuple(disparity.shape) != expected:
             raise ValueError(f"disparity must be {expected}, got {tuple(disparity.shape)}")
         # NaN fails both comparisons, so this also rejects non-finite values.
@@ -173,6 +243,6 @@ class DisparityChannel(BatchPreprocessor):
                 f"disparity must be finite and lie in [0, 1]; {int(bad.sum())} of "
                 f"{bad.numel()} values do not"
             )
-        channel = self.scale * (2 * disparity.float() - 1)
-        batch["clean_latent"] = torch.cat([clean, channel.to(clean)], dim=2)
+        channels = disparity_to_channels(self.scale * (2 * disparity.float() - 1))
+        batch["clean_latent"] = torch.cat([clean, channels.to(clean)], dim=2)
         return batch

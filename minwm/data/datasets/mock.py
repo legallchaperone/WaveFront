@@ -7,6 +7,8 @@ contract, with no LMDB / disk dependency. For pipeline tests only.
 import torch
 from torch.utils.data import Dataset
 
+from minwm.processors import DISP_UNSHUFFLE
+
 __all__ = ["MockCameraLatentDataset"]
 
 
@@ -24,8 +26,8 @@ class MockCameraLatentDataset(Dataset):
             ``[ode_steps, F, C, H, W]`` (most-noisy -> clean) instead of a single
             ``clean_latent``. Must be ``len(denoising_step_list) + 1`` for the ODE
             recipe.
-        with_disparity (bool): also emit ``disparity`` ``[F, 1, H, W]`` uniform in
-            ``[0, 1]``, the input :class:`~minwm.processors.DisparityChannel` expects.
+        with_disparity (bool): also emit dense ``disparity`` ``[F, 1, 4H, 4W]`` uniform
+            in ``[0, 1]``, the input :class:`~minwm.processors.DisparityChannel` expects.
         seed (int): base RNG seed (per-sample deterministic).
     """
 
@@ -66,7 +68,9 @@ class MockCameraLatentDataset(Dataset):
             }
         if self.with_disparity:
             frames, _, height, width = self.shape
-            sample["disparity"] = torch.rand(frames, 1, height, width, generator=g)
+            sample["disparity"] = torch.rand(
+                frames, 1, DISP_UNSHUFFLE * height, DISP_UNSHUFFLE * width, generator=g
+            )
         if self.with_camera:
             sample["viewmats"] = torch.eye(4).unsqueeze(0).repeat(self.num_frames, 1, 1)
             sample["Ks"] = torch.eye(3).unsqueeze(0).repeat(self.num_frames, 1, 1)

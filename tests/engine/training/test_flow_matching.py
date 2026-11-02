@@ -171,7 +171,7 @@ class TestJointFlowMatchingLoss:
         from minwm.engine.training.losses import JointFlowMatchingLoss
 
         torch.manual_seed(0)
-        pred, target = torch.randn(1, 2, 17, 2, 2), torch.randn(1, 2, 17, 2, 2)
+        pred, target = torch.randn(1, 2, 32, 2, 2), torch.randn(1, 2, 32, 2, 2)
         batch = {
             "target": target,
             "weight": torch.tensor([2.0, 0.5]).reshape(1, 2, 1, 1, 1),
@@ -186,11 +186,12 @@ class TestJointFlowMatchingLoss:
         assert storage.latest()["loss_rgb"] == pytest.approx(rgb, rel=1e-6)
         assert storage.latest()["loss_disp"] == pytest.approx(disp, rel=1e-6)
 
-    def test_rejects_prediction_without_disparity_channel(self):
+    @pytest.mark.parametrize("channels", [16, 17])  # no disparity / the old single channel
+    def test_rejects_prediction_without_16_disparity_channels(self, channels):
         from minwm.engine.training.losses import JointFlowMatchingLoss
 
-        pred = torch.zeros(1, 2, 16, 2, 2)
-        with pytest.raises(ValueError, match="1 disparity"):
+        pred = torch.zeros(1, 2, channels, 2, 2)
+        with pytest.raises(ValueError, match="16 disparity"):
             JointFlowMatchingLoss()(pred, {"target": pred}, scheduler=None)
 
     def test_config_can_name_it(self):

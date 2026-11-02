@@ -147,3 +147,16 @@ def test_result_writer_latents_only_when_no_video(tmp_path):
     path = writer.write("clip_09", {"latents": torch.zeros(1, 1, 4, 2, 2)})
     assert path.endswith("clip_09.latents.pt")
     assert os.path.exists(path)
+
+
+def test_result_writer_saves_one_samples_disparity_as_float32(tmp_path):
+    writer = ResultWriter(str(tmp_path), fps=16)
+    writer.ensure_dir()
+    disparity = torch.rand(1, 3, 1, 8, 8).to(torch.bfloat16)
+    writer.write("clip_10", {"latents": torch.zeros(1, 3, 16, 2, 2), "disparity": disparity})
+    saved = torch.load(os.path.join(str(tmp_path), "clip_10.disparity.pt"))
+    assert saved.dtype == torch.float32 and saved.shape == (3, 1, 8, 8)
+    assert torch.equal(saved, disparity[0].float())
+
+    writer.write("clip_11", {"latents": torch.zeros(1, 3, 16, 2, 2)})
+    assert not os.path.exists(os.path.join(str(tmp_path), "clip_11.disparity.pt"))

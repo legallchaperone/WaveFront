@@ -1,4 +1,4 @@
-"""Tests for the causal Wan ``use_disparity`` channel (baseline ②, joint depth)."""
+"""Tests for the causal Wan ``use_disparity`` channels (baseline ②, joint depth)."""
 
 import pytest
 import torch
@@ -7,6 +7,7 @@ from torch.nn.attention.flex_attention import flex_attention
 import minwm.modeling.wan21.blocks as wan_blocks
 from minwm.modeling.wan21.adapter import Wan21Adapter
 from minwm.modeling.wan21.causal import CausalWan21Model
+from minwm.processors import DISP_CHANNELS, DisparityChannel, disparity_from_channels
 
 _ARCH = dict(
     model_type="t2v",
@@ -21,6 +22,7 @@ _ARCH = dict(
     out_dim=16,
     num_frame_per_block=2,
 )
+_DISP = dict(use_disparity=True, disparity_scale=0.5)
 _F, _H, _W = 4, 8, 8
 _FRAME_SEQLEN = (_H // 2) * (_W // 2)
 _DISP_KEYS = [
@@ -37,14 +39,14 @@ def _base_and_disp():
     base = CausalWan21Model(**_ARCH).eval()
     with torch.no_grad():
         base.head.head.weight.add_(0.1)  # the zero-init head would make every output 0
-    disp = CausalWan21Model(**_ARCH, use_disparity=True).eval()
+    disp = CausalWan21Model(**_ARCH, **_DISP).eval()
     missing, unexpected = disp.load_state_dict(base.state_dict(), strict=False)
     assert sorted(missing) == _DISP_KEYS and unexpected == []
     return base, disp
 
 
 def _with_disparity(rgb):
-    return torch.cat([rgb, torch.randn(1, *rgb.shape[1:])])
+    return torch.cat([rgb, torch.randn(DISP_CHANNELS, *rgb.shape[1:])])
 
 
 @pytest.fixture
@@ -68,10 +70,10 @@ def _teacher_forcing(model, x, clean_x):
 
 
 def _assert_rgb_unchanged_and_disparity_zero(out_base, out_disp):
-    assert out_disp.shape[1] == 17
+    assert out_disp.shape[1] == 16 + DISP_CHANNELS
     assert float(out_base.norm()) > 0
     torch.testing.assert_close(out_disp[:, :16], out_base)
-    assert bool((out_disp[:, 16] == 0).all())
+    assert bool((out_disp[:, 16:] == 0).all())
 
 
 class TestConstruction:
@@ -81,14 +83,19 @@ class TestConstruction:
         assert not any("disp" in key for key in model.state_dict())
 
     def test_enabled_branch_is_zero_initialised_and_in_config(self):
-        model = CausalWan21Model(**_ARCH, use_disparity=True)
+        model = CausalWan21Model(**_ARCH, **_DISP)
         params = dict(model.named_parameters())
         assert all(bool((params[key] == 0).all()) for key in _DISP_KEYS)
         assert model.config.use_disparity is True
+        assert model.config.disparity_scale == 0.5 and model.disparity_scale == 0.5
+
+    def test_requires_disparity_scale(self):
+        with pytest.raises(ValueError, match="disparity_scale"):
+            CausalWan21Model(**_ARCH, use_disparity=True)
 
     def test_rejects_i2v(self):
         with pytest.raises(ValueError, match="t2v"):
-            CausalWan21Model(**{**_ARCH, "model_type": "i2v"}, use_disparity=True)
+            CausalWan21Model(**{**_ARCH, "model_type": "i2v"}, **_DISP)
 
 
 class TestZeroInitIsNoop:
@@ -145,34 +152,87 @@ class TestDisparityInputIsUsed:
         clean = _with_disparity(torch.randn(16, _F, _H, _W))
         shifted = [x.clone() for x in (noisy, clean)]
         for x in shifted:
-            x[16] += 1.0
+            x[16:] += 1.0
         reference = _teacher_forcing(disp, noisy, clean)
         assert not torch.allclose(_teacher_forcing(disp, shifted[0], clean), reference)
         assert not torch.allclose(_teacher_forcing(disp, noisy, shifted[1]), reference)
 
 
+def _dense_to_model_input(disparity):
+    """Dense ``[F, 1, 4H, 4W]`` -> ``[16 + DISP_CHANNELS, F, H, W]`` via DisparityChannel."""
+    frames, _, height, width = disparity.shape
+    clean = torch.zeros(1, frames, 16, height // 4, width // 4)
+    batch = DisparityChannel(scale=1.0)(
+        {"clean_latent": clean, "disparity": disparity[None]}, torch.device("cpu")
+    )
+    return batch["clean_latent"][0].permute(1, 0, 2, 3)
+
+
+def _model_output_to_dense(out):
+    """``[16 + DISP_CHANNELS, F, H, W]`` model output -> dense ``[F, 1, 4H, 4W]``."""
+    return disparity_from_channels(out[16:].permute(1, 0, 2, 3))
+
+
 class TestOutputLayout:
-    def test_disparity_fills_each_tokens_2x2_pixels_in_order(self):
-        """disp_head's 4 outputs per token land on that token's pixels, row-major."""
+    def test_shapes(self):
+        model = CausalWan21Model(**_ARCH, **_DISP)
+        assert model.disp_embed.weight.shape == (64, DISP_CHANNELS, 1, 2, 2)
+        assert model.head.disp_head.weight.shape == (4 * DISP_CHANNELS, 64)
+
+    def test_disparity_output_is_trailing_channels_per_latent_cell(self, eager_flex):
+        """disp_head output ``p * 16 + k`` lands at channel ``16 + k`` of the token's pixel ``p``.
+
+        Full path: dense disparity -> DisparityChannel -> forward -> disparity_from_channels.
+        With ``disp_head`` reduced to a hand-set bias, the dense output is a known pattern.
+        """
         base, disp = _base_and_disp()
         with torch.no_grad():
-            disp.head.disp_head.bias.copy_(torch.arange(4.0))
-        tokens = torch.randn(1, _F * _FRAME_SEQLEN, 64)
-        e = torch.randn(1, _F, 1, 64)
-        grid = torch.tensor([[_F, _H // 2, _W // 2]])
+            disp.head.disp_head.bias.copy_(torch.arange(4.0 * DISP_CHANNELS))
+        torch.manual_seed(1)
+        x = _dense_to_model_input(torch.rand(_F, 1, 4 * _H, 4 * _W))
+        clean_x = _dense_to_model_input(torch.rand(_F, 1, 4 * _H, 4 * _W))
+        out = _teacher_forcing(disp, x, clean_x)[0]
+        torch.testing.assert_close(out[:16], _teacher_forcing(base, x[:16], clean_x[:16])[0])
+
+        rows = torch.arange(4 * _H)[:, None]
+        cols = torch.arange(4 * _W)[None, :]
+        patch = (rows // 4 % 2) * 2 + cols // 4 % 2
+        channel = (rows % 4) * 4 + cols % 4
+        expected = (patch * DISP_CHANNELS + channel).float().expand(_F, 1, -1, -1)
+        assert torch.equal(_model_output_to_dense(out), expected)
+
+    def test_embed_and_head_share_the_channel_layout(self):
+        """With disp_embed one-hot and disp_head the identity, the head returns the input."""
+        _, disp = _base_and_disp()
+        patch, dim = 4, _ARCH["dim"]
         with torch.no_grad():
-            rgb = base.unpatchify(base.head(tokens, e), grid)[0]
-            out = disp.unpatchify(disp.head(tokens, e), grid)[0]
-        torch.testing.assert_close(out[:16], rgb)
-        disparity = out[16]
-        for value, (row, col) in enumerate([(0, 0), (0, 1), (1, 0), (1, 1)]):
-            assert bool((disparity[:, row::2, col::2] == value).all())
+            disp.patch_embedding.bias.zero_()
+            disp.head.modulation.zero_()
+            weight = torch.zeros_like(disp.disp_embed.weight)
+            for p in range(patch):
+                for k in range(DISP_CHANNELS):
+                    weight[p * DISP_CHANNELS + k, k, 0, p // 2, p % 2] = 1.0
+            disp.disp_embed.weight.copy_(weight)
+            disp.head.disp_head.weight.copy_(torch.eye(dim))
+        disp.head.norm = torch.nn.Identity()
+
+        frames, height, width = 2, 4, 6
+        dense = torch.rand(frames, 1, 4 * height, 4 * width)
+        x = _dense_to_model_input(dense)
+        with torch.no_grad():
+            tokens = disp._patch_embed(x[None]).flatten(2).transpose(1, 2)
+            out = disp.unpatchify(
+                disp.head(tokens, torch.zeros(1, frames, 1, dim)),
+                torch.tensor([[frames, height // 2, width // 2]]),
+            )[0]
+        assert torch.equal(out[16:], x[16:])
+        assert torch.equal(_model_output_to_dense(out), 2 * dense - 1)
 
 
 class TestCheckpoint:
     def test_disparity_weights_load_strictly_only_with_use_disparity(self):
-        state = CausalWan21Model(**_ARCH, use_disparity=True).state_dict()
-        CausalWan21Model(**_ARCH, use_disparity=True).load_state_dict(state, strict=True)
+        state = CausalWan21Model(**_ARCH, **_DISP).state_dict()
+        CausalWan21Model(**_ARCH, **_DISP).load_state_dict(state, strict=True)
         with pytest.raises(RuntimeError, match="disp_embed"):
             CausalWan21Model(**_ARCH).load_state_dict(state, strict=True)
 
@@ -184,7 +244,7 @@ class TestCheckpoint:
         with torch.no_grad():
             base.head.head.weight.add_(0.1)
         torch.save({"model": base.state_dict()}, tmp_path / "stage1.pt")
-        disp = CausalWan21Model(**_ARCH, use_disparity=True)
+        disp = CausalWan21Model(**_ARCH, **_DISP)
         with torch.no_grad():
             disp.disp_embed.weight.add_(1.0)  # must come back as zero from the load
 
@@ -201,6 +261,4 @@ class TestCheckpoint:
         del state["head.head.weight"]
         torch.save({"model": state}, tmp_path / "broken.pt")
         with pytest.raises(RuntimeError, match="head.head.weight"):
-            load_model_weights(
-                CausalWan21Model(**_ARCH, use_disparity=True), str(tmp_path / "broken.pt")
-            )
+            load_model_weights(CausalWan21Model(**_ARCH, **_DISP), str(tmp_path / "broken.pt"))

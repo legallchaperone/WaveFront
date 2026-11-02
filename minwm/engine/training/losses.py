@@ -17,6 +17,7 @@ import torch
 from torch import Tensor
 
 from minwm.engine.events import get_event_storage, has_event_storage
+from minwm.processors import DISP_CHANNELS
 from minwm.sampling.schedulers import FlowMatchingScheduler
 
 __all__ = [
@@ -104,18 +105,20 @@ class FlowMatchingLoss(BasicLoss):
 class JointFlowMatchingLoss(BasicLoss):
     """Weighted velocity MSE on the latents plus ``disp_weight`` times the same on disparity.
 
-    For ``use_disparity`` models, whose last channel is disparity. Each term is a
-    mean over its own elements, so at ``disp_weight=1`` a token's latents (64 values
-    per token at Wan's 16 channels and 2x2 patches) and its disparity (4 values)
-    count equally. The unweighted terms are also recorded as ``loss_rgb`` /
+    For ``use_disparity`` models, whose last ``DISP_CHANNELS`` channels are dense
+    disparity (see :class:`~minwm.processors.DisparityChannel`). Each term is a mean
+    over its own elements. At Wan's 16 channels and 2x2 patches a token holds 64 latent
+    values and 64 disparity values, so at ``disp_weight=1`` the two terms carry equal
+    weight per token. The unweighted terms are also recorded as ``loss_rgb`` /
     ``loss_disp`` on the active :class:`~minwm.engine.events.EventStorage`.
 
     Args:
         disp_weight (float): weight λ of the disparity term.
-        latent_channels (int): latent channels before the disparity channel.
+        latent_channels (int): latent channels before the disparity channels.
 
     Raises:
-        ValueError: if the prediction does not have ``latent_channels + 1`` channels.
+        ValueError: if the prediction does not have ``latent_channels + DISP_CHANNELS``
+            channels.
     """
 
     def __init__(self, disp_weight: float = 1.0, latent_channels: int = 16) -> None:
@@ -123,10 +126,10 @@ class JointFlowMatchingLoss(BasicLoss):
         self.latent_channels = latent_channels
 
     def __call__(self, pred: Tensor, batch: dict, scheduler: FlowMatchingScheduler) -> Tensor:
-        if pred.shape[2] != self.latent_channels + 1:
+        if pred.shape[2] != self.latent_channels + DISP_CHANNELS:
             raise ValueError(
-                f"expected {self.latent_channels} latent + 1 disparity channels, "
-                f"got {pred.shape[2]}"
+                f"expected {self.latent_channels} latent + {DISP_CHANNELS} disparity "
+                f"channels, got {pred.shape[2]}"
             )
         target, c = batch["target"], self.latent_channels
         kwargs = dict(weight=batch.get("weight"), mask=batch.get("loss_mask"))

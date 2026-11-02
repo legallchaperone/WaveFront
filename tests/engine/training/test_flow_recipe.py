@@ -103,16 +103,17 @@ class _IdentityAdapter:
 
 
 class _Identity(torch.nn.Module):
-    def __init__(self):
+    def __init__(self, disparity_scale=None):
         super().__init__()
         self.p = torch.nn.Parameter(torch.zeros(()))
+        self.disparity_scale = disparity_scale
 
     def forward(self, x):
         return x
 
 
 class TestARTFValidation:
-    def _recipe(self, disparity_scale=None, **kw):
+    def _recipe(self, disparity=None, **kw):
         from minwm.engine.training.losses import FlowMatchingLoss
         from minwm.engine.training.recipes.ar_tf import ARTFRecipe
 
@@ -120,8 +121,8 @@ class TestARTFValidation:
             dict(type="FlowNoise", uniform_across_frames=False, num_frame_per_block=2),
             dict(type="CleanContextNoiseAug", max_timestep=0),
         ]
-        if disparity_scale is not None:
-            chain.insert(0, dict(type="DisparityChannel", scale=disparity_scale))
+        if disparity is not None:  # the DisparityChannel kwargs
+            chain.insert(0, dict(type="DisparityChannel", **disparity))
         return ARTFRecipe(
             loss=FlowMatchingLoss(), adapter=_IdentityAdapter(), batch_preprocessors=chain, **kw
         )
@@ -148,21 +149,23 @@ class TestARTFValidation:
         )
 
     def test_disparity_is_scored_separately(self):
-        """With DisparityChannel: latents and disparity split, plus the x0 error in d units."""
+        """With DisparityChannel: latents and dense disparity split, plus the x0 error in d."""
         import pytest
 
         from minwm.engine.training.losses import mse_loss
+        from minwm.processors import disparity_from_channels, disparity_to_channels
 
-        recipe = self._recipe(disparity_scale=2.0, val_sigmas=(0.5,), val_seed=0)
+        recipe = self._recipe(disparity={}, val_sigmas=(0.5,), val_seed=0)
         clean = torch.randn(1, 4, 3, 2, 2)
-        disparity = torch.rand(1, 4, 1, 2, 2)
+        disparity = torch.rand(1, 4, 1, 8, 8)
         out = recipe.validation_step(
-            _Identity(), {"clean_latent": clean, "disparity": disparity}, index=0
+            _Identity(disparity_scale=2.0), {"clean_latent": clean, "disparity": disparity}, 0
         )
 
         names = ("val/loss_rgb", "val/loss_disp", "val/disp_err")
         assert set(out) == {f"{n}@0.5" for n in names} | set(names)
-        full = torch.cat([clean, 2.0 * (2 * disparity - 1)], dim=2)
+        full = torch.cat([clean, disparity_to_channels(2.0 * (2 * disparity - 1))], dim=2)
+        assert full.shape == (1, 4, 3 + 16, 2, 2)
         noise = torch.randn(full.shape, generator=torch.Generator().manual_seed(0))
         sigma = recipe.scheduler.sigma_for(torch.tensor(500.0))
         noisy = (1 - sigma) * full + sigma * noise  # the identity model predicts `noisy`
@@ -173,11 +176,77 @@ class TestARTFValidation:
         assert out["val/loss_disp@0.5"] == pytest.approx(
             mse_loss(noisy[:, :, 3:], target[:, :, 3:]).item()
         )
-        d_hat = ((noisy - sigma * noisy)[:, :, 3:] / 2.0 + 1) / 2  # x0 = x_t - σ·v, unscaled
+        x0 = (noisy - sigma * noisy)[:, :, 3:]  # x0 = x_t - σ·v
+        d_hat = disparity_from_channels(x0 / 2.0 + 1) / 2  # back to dense d in [0, 1] units
         assert out["val/disp_err@0.5"] == pytest.approx((d_hat - disparity).abs().mean().item())
+
+    def test_explicit_scale_must_match_the_model(self):
+        import pytest
+
+        recipe = self._recipe(disparity={"scale": 1.0}, val_sigmas=(0.5,))
+        batch = {"clean_latent": torch.randn(1, 4, 3, 2, 2), "disparity": torch.rand(1, 4, 1, 8, 8)}
+        with pytest.raises(ValueError, match="differs"):
+            recipe.validation_step(_Identity(disparity_scale=2.0), batch, 0)
 
     def test_rejects_sigma_outside_unit_interval(self):
         import pytest
 
         with pytest.raises(ValueError, match="val_sigmas"):
             self._recipe(val_sigmas=(0.0, 0.5))
+
+
+class TestARTFDisparityTraining:
+    def test_first_step_reaches_both_disparity_branches(self, monkeypatch):
+        """Mock clip -> DisparityChannel chain -> tiny use_disparity model -> joint loss."""
+        from torch.nn.attention.flex_attention import flex_attention
+        from torch.utils.data import default_collate
+
+        import minwm.modeling.wan21.blocks as wan_blocks
+        from minwm.data.datasets.mock import MockCameraLatentDataset
+        from minwm.engine.training.losses import JointFlowMatchingLoss
+        from minwm.engine.training.recipes.ar_tf import ARTFRecipe
+        from minwm.modeling.wan21.adapter import Wan21Adapter
+        from minwm.modeling.wan21.causal import CausalWan21Model
+
+        # torch.compile'd flex attention has no CPU backend on every platform.
+        monkeypatch.setattr(wan_blocks, "_get_flex_attention", lambda: flex_attention)
+        torch.manual_seed(0)
+        model = CausalWan21Model(
+            model_type="t2v",
+            dim=64,
+            ffn_dim=128,
+            freq_dim=64,
+            text_len=8,
+            text_dim=64,
+            num_heads=4,
+            num_layers=2,
+            num_frame_per_block=2,
+            use_disparity=True,
+            disparity_scale=0.5,
+        )
+        with torch.no_grad():
+            model.head.head.weight.normal_(std=0.1)  # as from a trained Stage 1 checkpoint
+        dataset = MockCameraLatentDataset(
+            length=1, num_frames=4, height=4, width=4, with_camera=False, with_disparity=True
+        )
+        recipe = ARTFRecipe(
+            loss=JointFlowMatchingLoss(),
+            adapter=Wan21Adapter(causal=True, text_len=8, text_dim=64, dtype="float32"),
+            batch_preprocessors=[
+                dict(type="LatentToDevice"),
+                dict(type="DisparityChannel"),
+                dict(type="FlowNoise", uniform_across_frames=False, num_frame_per_block=2),
+                dict(type="CleanContextNoiseAug", max_timestep=0),
+            ],
+        )
+        optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+
+        out = recipe.train_one_step(
+            model, default_collate([dataset[0]]), {"main": optimizer}, step=0
+        )
+
+        assert torch.isfinite(torch.tensor(out["loss"]))
+        assert recipe.batch_preprocessors[1].scale == 0.5  # bound from the model
+        for param in (model.disp_embed.weight, model.head.disp_head.weight):
+            assert param.grad is not None and float(param.grad.abs().sum()) > 0
+            assert float(param.abs().sum()) > 0  # the step moved it off zero

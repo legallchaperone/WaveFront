@@ -391,11 +391,13 @@ class BaseInferencer:
 class ResultWriter:
     """Persist a loop's ``generate`` result (video + latents) under a directory.
 
-    ``loop.generate`` returns ``{'latents', 'video'?}`` — a video only when a VAE
-    is attached. The writer decodes the mp4 when a video is present and always
-    keeps the latents next to it (as ``{name}.latents.pt``), since latent-space
-    downstream use (policy eval, rollout re-feed, latent metrics) is a first-class
-    world-model consumer that the old ``write_video``-only path discarded.
+    ``loop.generate`` returns ``{'latents', 'video'?, 'disparity'?}`` — a video only
+    when a VAE is attached, disparity only from a ``use_disparity`` generator. The
+    writer decodes the mp4 when a video is present and always keeps the latents next
+    to it (as ``{name}.latents.pt``), since latent-space downstream use (policy eval,
+    rollout re-feed, latent metrics) is a first-class world-model consumer that the
+    old ``write_video``-only path discarded. Disparity is kept as
+    ``{name}.disparity.pt``.
     """
 
     def __init__(self, out_dir: str, *, fps: int = 16) -> None:
@@ -410,8 +412,10 @@ class ResultWriter:
 
         Args:
             name (str): sanitized base filename (no extension).
-            result (dict): a ``loop.generate`` result with ``latents`` and an
-                optional ``video`` ``[B,F,C,H,W]`` tensor in ``[0,1]``.
+            result (dict): a ``loop.generate`` result with ``latents``, an optional
+                ``video`` ``[B,F,C,H,W]`` tensor in ``[0,1]``, and an optional
+                ``disparity`` ``[B,F,1,4H,4W]`` in ``d`` units; the first sample's
+                disparity is saved as float32 ``[F,1,4H,4W]``.
 
         Returns:
             str: the mp4 path when a video was written, else the latents path.
@@ -420,6 +424,10 @@ class ResultWriter:
         latents_path = os.path.join(self.out_dir, f"{name}.latents.pt")
         if latents is not None:
             torch.save(latents.detach().cpu(), latents_path)
+        disparity = result.get("disparity")
+        if disparity is not None:
+            disparity_path = os.path.join(self.out_dir, f"{name}.disparity.pt")
+            torch.save(disparity[0].detach().float().cpu(), disparity_path)
         video = result.get("video")
         if video is None:
             return latents_path

@@ -16,7 +16,16 @@ from .base import BatchPreprocessor, InferenceInputPreprocessor, InferenceRuntim
 from .camera import CameraTrajectory, make_camera_tensors, parse_trajectory
 from .flow import CleanContextNoiseAug, FirstFrameConditioning, FlowNoise
 from .hy import HYConditioning
-from .latent import DisparityChannel, InitialLatent, LatentNoise, LatentToDevice
+from .latent import (
+    DISP_CHANNELS,
+    DISP_UNSHUFFLE,
+    DisparityChannel,
+    InitialLatent,
+    LatentNoise,
+    LatentToDevice,
+    disparity_from_channels,
+    disparity_to_channels,
+)
 from .ode import ODETrajectorySample
 
 __all__ = [
@@ -25,6 +34,10 @@ __all__ = [
     "InferenceInputPreprocessor",
     "LatentToDevice",
     "DisparityChannel",
+    "DISP_UNSHUFFLE",
+    "DISP_CHANNELS",
+    "disparity_to_channels",
+    "disparity_from_channels",
     "FlowNoise",
     "FirstFrameConditioning",
     "CleanContextNoiseAug",
