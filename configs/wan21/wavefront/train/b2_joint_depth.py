@@ -4,7 +4,7 @@ Continues the Wan Action2V Stage 1 checkpoint (released as ``ar_diffusion_tf``,
 linked as ``stage1_ar_tf``) with the choices in ``docs/ai-generated/decisions.md``:
 dense disparity rides as 16 pixel-unshuffled channels after the 16 latent channels
 (``use_disparity``), fed as ``a·(2d − 1)`` by ``DisparityChannel`` and trained with
-``JointFlowMatchingLoss`` (λ = 1). ``a = 1`` is set only as ``model.disparity_scale``;
+``JointFlowMatchingLoss`` (λ = 1). ``a = 1.5`` is set only as ``model.disparity_scale``;
 ``DisparityChannel``, the validation ``disp_err`` and inference all read it from there.
 Noise stays uniform within each AR chunk (s = 0). The checkpoint, data, budget and
 validation are shared with baseline 1 in ``_stage1_continue.py``.
@@ -26,7 +26,7 @@ _base_ = "_stage1_continue.py"
 
 training = dict(output_dir="outputs/b2-jointdisp-a1-lam1")
 
-model = dict(use_disparity=True, disparity_scale=1.0)
+model = dict(use_disparity=True, disparity_scale=1.5)
 
 recipe = dict(
     loss=dict(type="JointFlowMatchingLoss", disp_weight=1.0),
