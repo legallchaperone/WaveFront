@@ -3,8 +3,10 @@
 # minwm is installed editable (`pip install -e .`) so `import minwm` resolves
 # without PYTHONPATH. Only the minwm package is installed — the legacy trees
 # (HY15/, Wan21/, shared/) are NOT packaged; their run-scripts self-set
-# PYTHONPATH. Runtime deps stay pinned in requirements/ (not declared here), so
-# install is two steps: `pip install -r requirements/base.txt` then `pip install -e .`.
+# PYTHONPATH. Runtime deps are pinned in [project].dependencies below, and
+# `uv sync --frozen` installs them from uv.lock on every supported platform.
+# requirements/base.txt mirrors the same pins for pip and the Docker images;
+# tests/test_requirements_sync.py keeps the two identical.
 
 [build-system]
 requires = ["setuptools>=77"]

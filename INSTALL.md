@@ -27,6 +27,21 @@ Requirements are organized by mode under `[requirements/](requirements/)`:
 
 ## Installation
 
+**With uv (recommended on Linux, x86_64 or aarch64).** `pyproject.toml` declares the
+pins and `uv.lock` resolves them for both architectures, so one command builds the
+same env on every Linux machine:
+
+```bash
+uv sync --frozen --python 3.12   # pinned deps + minwm editable, into .venv
+```
+
+Use uv's own Python (`UV_PYTHON_PREFERENCE=only-managed`) where the system Python
+lacks headers: Triton builds kernels against `Python.h`. On a cluster, keep the env
+on a fast filesystem; importing torch from a slow network disk can take minutes.
+
+**With pip.** `requirements/base.txt` holds the same pins as `pyproject.toml`
+(a test keeps them identical):
+
 ```bash
 # 1. Clone
 git clone <repo-url> minWM-engine
