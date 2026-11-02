@@ -24,6 +24,7 @@
 ## 1. 基本单位
 
 - **像素帧 / latent 帧**：视频的原始帧 / Wan VAE 压缩后的帧。F 个 latent 帧解码为 1+4(F−1) 个像素帧：第 0 个 latent 帧对应 1 个像素帧，之后每个对应 4 个。
+- **原视频帧 / 标注帧**（代码名 `source_frame` / `annotation`）：SpatialVID 原视频的帧 / 其中带位姿、内参和深度的那些帧（约每 0.17–0.2 秒一个，`indexes.txt` 第 1 列是它在原视频里的帧号）。重采样到 16 fps 后的帧才叫像素帧；位姿在标注帧之间插值，深度取最近的标注帧（6.2）。
 - **latent 格**：latent 网格上的一个位置。480×832 的帧压成 60×104 个 latent 格，每个覆盖 8×8 像素，RGB 在每格有 16 个通道。
 - **token**：DiT 的处理单位，即一个 latent 帧上 2×2 的 patch（2×2 个 latent 格），覆盖 16×16 像素 ×（1 或 4）个像素帧。480×832 下每个 latent 帧有 30×52 = 1560 个 token。
 - **chunk**（代码名 `chunk`；minWM 中叫 `block`）：4 个 latent 帧，共 6240 个 token。模型逐 chunk 自回归生成，chunk 之间 causal。
