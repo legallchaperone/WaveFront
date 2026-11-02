@@ -220,10 +220,26 @@ def test_merge_delete_replaces_the_inherited_node():
     assert override["data"]["dataset"]["_delete_"] is True  # the caller's dict is untouched
 
 
-def test_b2_joint_depth_configs_load_and_parse():
+def test_baseline_configs_load_and_share_their_setup():
     stage1 = load("configs/wan21/action2v/train/stage1_ar_tf.py")
+    b1 = load("configs/wan21/wavefront/train/b1_continue.py")
     real = load("configs/wan21/wavefront/train/b2_joint_depth.py")
     mock = load("configs/wan21/wavefront/train/b2_joint_depth_mock.py")
+
+    MWMConfig.from_dict(b1)
+    assert not b1["model"].get("use_disparity", False)
+    assert b1["recipe"]["loss"] == stage1["recipe"]["loss"]
+    assert b1["recipe"]["batch_preprocessors"] == stage1["recipe"]["batch_preprocessors"]
+    # Everything but the run's own changes must match between baselines 1 and 2.
+    for section in ("checkpoint", "data"):
+        assert b1[section] == real[section], section
+    for cfg in (b1, real):
+        cfg["training"].pop("output_dir")
+        for key in ("wandb_tags", "wandb_notes"):
+            cfg["monitor"].pop(key)
+    assert b1["training"] == real["training"] and b1["monitor"] == real["monitor"]
+    assert b1["recipe"]["optimizer"] == real["recipe"]["optimizer"]
+
     for cfg in (real, mock):
         MWMConfig.from_dict(cfg)
         assert cfg["model"]["type"] == "CausalWan21Model" and cfg["model"]["use_disparity"]

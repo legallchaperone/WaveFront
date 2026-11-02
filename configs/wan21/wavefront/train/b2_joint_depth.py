@@ -6,8 +6,8 @@ dense disparity rides as 16 pixel-unshuffled channels after the 16 latent channe
 (``use_disparity``), fed as ``a·(2d − 1)`` by ``DisparityChannel`` and trained with
 ``JointFlowMatchingLoss`` (λ = 1). ``a = 1`` is set only as ``model.disparity_scale``;
 ``DisparityChannel``, the validation ``disp_err`` and inference all read it from there.
-Noise stays uniform within each AR chunk (s = 0). Optimizer, learning rate and batch
-size come from the Stage 1 config, so baseline 1 can match them.
+Noise stays uniform within each AR chunk (s = 0). The checkpoint, data, budget and
+validation are shared with baseline 1 in ``_stage1_continue.py``.
 
 The Stage 1 checkpoint has no disparity branch; ``load_model_weights`` fills it
 with zeros, so the run starts from Stage 1's exact latent predictions.
@@ -22,21 +22,9 @@ writes it, and the dataset that reads it, are not in the repo yet; until then us
         --output-dir outputs/b2-jointdisp-a1-lam1
 """
 
-_base_ = "../../action2v/train/stage1_ar_tf.py"
+_base_ = "_stage1_continue.py"
 
-_STAGE1 = "./ckpts/Wan21/Action2V/stage1_ar_tf/model.pt"
-_LMDB = "./dataset/WaveFront/spatialvid/train"
-_LMDB_VAL = "./dataset/WaveFront/spatialvid/val"
-
-training = dict(
-    max_steps=3_000,
-    log_interval=1,
-    ckpt_interval=1_000,
-    eval_interval=250,
-    output_dir="outputs/b2-jointdisp-a1-lam1",
-)
-
-checkpoint = dict(pretrained=_STAGE1)
+training = dict(output_dir="outputs/b2-jointdisp-a1-lam1")
 
 model = dict(use_disparity=True, disparity_scale=1.0)
 
@@ -50,15 +38,7 @@ recipe = dict(
     ],
 )
 
-data = dict(
-    dataset=dict(type="CameraLatentLMDBDataset", data_path=_LMDB),
-    val_dataset=dict(type="CameraLatentLMDBDataset", data_path=_LMDB_VAL),
-)
-
 monitor = dict(
-    backends=["wandb"],
-    wandb_project="wavefront",
-    wandb_group="main-table",
     wandb_tags=["b2", "joint-depth", "a1", "lam1"],
     wandb_notes="Baseline 2: Stage 1 + jointly denoised disparity channel, s=0",
 )
