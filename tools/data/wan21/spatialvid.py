@@ -1,9 +1,13 @@
-"""Plan one SpatialVID-HQ clip for the WaveFront LMDB: frame times, poses, intrinsics, depth frames.
+"""Plan one SpatialVID-HQ clip for the WaveFront LMDB: window, frames, poses, intrinsics, depth.
 
-This is the clip-planning step of the SpatialVID -> LMDB preprocessing. It reads only a clip's
-annotation directory and its metadata row, and follows the contract in
-``docs/ai-generated/decisions.md`` (section "2026-11-01：SpatialVID 数据格式"). It decodes no
-video, reads no depth and writes nothing.
+This is the clip-planning step of the SpatialVID -> LMDB preprocessing, plus the per-clip readers
+the LMDB writer (``build_spatialvid_lmdb.py``) uses: the planned frames and the caption. Planning
+reads a clip's annotation directory, its metadata row and its video stream header, and follows
+the contract in ``docs/ai-generated/decisions.md`` (section "2026-11-01：SpatialVID 数据格式"). The
+CLI selects clips; it decodes no video and reads no depth.
+
+Each clip yields one 77-pixel-frame window starting at an annotation frame, chosen from the clip
+id so every run picks the same one.
 
 SpatialVID ``poses.npy`` rows are w2c OpenCV ``[tx, ty, tz, qx, qy, qz, qw]`` (the lietorch SE3
 layout written by the DROID-SLAM / MegaSaM tracker; the official ``utils/quat_to_mat.py`` and
@@ -16,11 +20,13 @@ Usage::
     python tools/data/wan21/spatialvid.py \\
         --metadata /path/SpatialVID-HQ/data/train/SpatialVID_HQ_metadata.csv \\
         --annotations_root /path/SpatialVID-HQ/extracted/annotations/SpatialVID \\
-        --group 1 --num_clips 5
+        --videos_root /path/SpatialVID-HQ/extracted/videos/SpatialVID \\
+        --group 1 --output clip_ids_group_0001.txt
 """
 
 import argparse
 import csv
+import hashlib
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -28,12 +34,13 @@ from dataclasses import dataclass
 import numpy as np
 
 OUTPUT_FPS = 16
-NUM_PIXEL_FRAMES = 45
+NUM_PIXEL_FRAMES = 77
 PIXEL_FRAMES_PER_LATENT = 4
 NUM_LATENT_FRAMES = (NUM_PIXEL_FRAMES - 1) // PIXEL_FRAMES_PER_LATENT + 1
-MIN_SPAN_SECONDS = 2.75
+WINDOW_SECONDS = (NUM_PIXEL_FRAMES - 1) / OUTPUT_FPS
 SOURCE_WIDTH, SOURCE_HEIGHT = 1280, 720
 CROP_WIDTH = 1248
+OUTPUT_WIDTH, OUTPUT_HEIGHT = 832, 480
 MAX_CROPPED_FX = 1.5
 TRANSLATION_SCALE = 1.54
 # CLI defaults only; plan_clip takes both thresholds explicitly.
@@ -41,9 +48,16 @@ MIN_WINDOW_PATH = 0.05
 MAX_DYNAMIC_RATIO = 0.3
 
 SKIP_SHORT_SPAN = "short_span"
+SKIP_HDR = "hdr"
 SKIP_LONG_FOCAL = "long_focal"
 SKIP_NEAR_STATIC = "near_static"
 SKIP_TOO_DYNAMIC = "too_dynamic"
+
+# HLG (arib-std-b67) and PQ (smpte2084), as FFmpeg numbers them in AVColorTransferCharacteristic.
+HDR_TRANSFERS = (16, 18)
+
+CAPTION_FIELDS = ("SceneSummary", "SceneDescription", "ShotImmersion", "CameraMotion")
+DEFAULT_CAPTION_FIELD = "SceneDescription"
 
 
 @dataclass(frozen=True)
@@ -74,21 +88,24 @@ class ClipPlan:
     Attributes:
         clip_id (str): clip id.
         skip_reasons (tuple[str, ...]): every ``SKIP_*`` reason that applies; empty if kept.
-        window_path (float | None): camera-centre path over the latent frames of the training
-            window in metres (before ``TRANSLATION_SCALE``); ``None`` if the clip is too short.
-        source_frames (np.ndarray | None): ``(45,)`` int64 source frame of each output pixel
+        start_frame (int | None): source frame of the window's first pixel frame, an annotation
+            frame; ``None`` if the clip has no room for a window.
+        window_path (float | None): camera-centre path over the latent frames of the window in
+            metres (before ``TRANSLATION_SCALE``); ``None`` if the clip has no room for a window.
+        source_frames (np.ndarray | None): ``(77,)`` int64 source frame of each output pixel
             frame.
-        source_times (np.ndarray | None): ``(45,)`` float64 time in seconds of those frames.
-        poses (np.ndarray | None): ``(12, 7)`` float32 w2c OpenCV ``[tx, ty, tz, qx, qy, qz, qw]``
+        source_times (np.ndarray | None): ``(77,)`` float64 time in seconds of those frames.
+        poses (np.ndarray | None): ``(20, 7)`` float32 w2c OpenCV ``[tx, ty, tz, qx, qy, qz, qw]``
             per latent frame, aligned to latent frame 0 and scaled by ``TRANSLATION_SCALE``.
         intrinsics (np.ndarray | None): ``(4,)`` float32 ``[fx/W, fy/H, cx/W, cy/H]`` after the
             crop to 1248×720 and resize to 832×480.
-        depth_indices (np.ndarray | None): ``(12,)`` int64 annotation index of the depth frame
+        depth_indices (np.ndarray | None): ``(20,)`` int64 annotation index of the depth frame
             for each latent frame.
     """
 
     clip_id: str
     skip_reasons: tuple[str, ...]
+    start_frame: int | None = None
     window_path: float | None = None
     source_frames: np.ndarray | None = None
     source_times: np.ndarray | None = None
@@ -130,11 +147,14 @@ def load_annotation(ann_dir: str) -> ClipAnnotation:
     )
 
 
-def output_source_frames(fps: float, num_frames: int = NUM_PIXEL_FRAMES) -> np.ndarray:
-    """Source frame of output pixel frame ``j``: ``round(j·fps/16)``, halves rounded up.
+def output_source_frames(
+    fps: float, start_frame: int = 0, num_frames: int = NUM_PIXEL_FRAMES
+) -> np.ndarray:
+    """Source frame of output pixel frame ``j``: ``round(t0·fps + j·fps/16)``, halves rounded up.
 
     Args:
         fps (float): source frame rate.
+        start_frame (int): source frame of the window start, i.e. ``t0·fps``.
         num_frames (int): number of output pixel frames.
 
     Returns:
@@ -142,7 +162,64 @@ def output_source_frames(fps: float, num_frames: int = NUM_PIXEL_FRAMES) -> np.n
     """
     # Half-up, not numpy's half-to-even: at 24 fps j·1.5 hits .5 on every odd j, and
     # half-to-even would make the frame spacing irregular (2,1,1,2,...) instead of (2,1,2,1,...).
-    return np.floor(np.arange(num_frames) * fps / OUTPUT_FPS + 0.5).astype(np.int64)
+    offsets = np.floor(np.arange(num_frames) * fps / OUTPUT_FPS + 0.5).astype(np.int64)
+    return start_frame + offsets
+
+
+def window_starts(frames: np.ndarray, fps: float) -> np.ndarray:
+    """Positions of the annotation frames that leave at least ``WINDOW_SECONDS`` of annotation.
+
+    A window starting at such a frame ends at or before the last annotation frame, so its poses
+    never need extrapolation.
+
+    Args:
+        frames (np.ndarray): ``(N,)`` increasing source frame numbers of the annotation frames.
+        fps (float): source frame rate.
+
+    Returns:
+        np.ndarray: ``(M,)`` int64 positions into ``frames``; empty if the clip is too short.
+    """
+    frames = np.asarray(frames)
+    return np.flatnonzero((frames[-1] - frames) / fps >= WINDOW_SECONDS).astype(np.int64)
+
+
+def choose_start(clip_id: str, num_starts: int) -> int:
+    """Pick one of ``num_starts`` window starts from the clip id, the same in every run.
+
+    Uses SHA-1 of the id, not ``hash()``, whose string hashing is salted per process.
+
+    Args:
+        clip_id (str): the clip id.
+        num_starts (int): number of valid starts.
+
+    Returns:
+        int: an index in ``[0, num_starts)``.
+    """
+    return int(hashlib.sha1(clip_id.encode()).hexdigest(), 16) % num_starts
+
+
+def video_is_hdr(video_path: str) -> bool:
+    """True if the video stream is HDR: more than 8 bits per sample, or an HLG / PQ transfer.
+
+    Reads only the container and stream headers.
+
+    Args:
+        video_path (str): the clip's mp4.
+
+    Returns:
+        bool: whether the clip is HDR.
+
+    Raises:
+        ValueError: if the header has no pixel format.
+    """
+    import av
+
+    with av.open(video_path) as container:
+        codec = container.streams.video[0].codec_context
+        if codec.format is None:
+            raise ValueError(f"{video_path}: no pixel format in the stream header")
+        bits = max(c.bits for c in codec.format.components)
+        return bits > 8 or codec.color_trc in HDR_TRANSFERS
 
 
 def crop_intrinsics(intrinsics: np.ndarray) -> np.ndarray:
@@ -241,7 +318,7 @@ def interpolate_c2w(c2w: np.ndarray, frames: np.ndarray, targets: np.ndarray) ->
     return out
 
 
-def latent_frame_c2w(annotation: ClipAnnotation, fps: float) -> np.ndarray:
+def latent_frame_c2w(annotation: ClipAnnotation, source_frames: np.ndarray) -> np.ndarray:
     """c2w poses of the latent frames in metres, aligned so latent frame 0 is the identity.
 
     Latent frame ``k`` takes output pixel frame ``4k`` at its actual source time, interpolated
@@ -249,12 +326,12 @@ def latent_frame_c2w(annotation: ClipAnnotation, fps: float) -> np.ndarray:
 
     Args:
         annotation (ClipAnnotation): the clip's annotation (w2c poses).
-        fps (float): source frame rate from the metadata.
+        source_frames (np.ndarray): ``(77,)`` source frame of each output pixel frame.
 
     Returns:
-        np.ndarray: ``(12, 4, 4)`` float64 aligned c2w poses, translations in metres.
+        np.ndarray: ``(20, 4, 4)`` float64 aligned c2w poses, translations in metres.
     """
-    targets = output_source_frames(fps)[::PIXEL_FRAMES_PER_LATENT]
+    targets = np.asarray(source_frames)[::PIXEL_FRAMES_PER_LATENT]
     c2w = interpolate_c2w(
         invert_rigid(pose_vec_to_matrix(annotation.poses)), annotation.frames, targets
     )
@@ -272,7 +349,7 @@ def _lmdb_poses(c2w: np.ndarray) -> np.ndarray:
     return matrix_to_pose_vec(invert_rigid(scaled)).astype(np.float32)
 
 
-def latent_frame_poses(annotation: ClipAnnotation, fps: float) -> np.ndarray:
+def latent_frame_poses(annotation: ClipAnnotation, source_frames: np.ndarray) -> np.ndarray:
     """Poses of the latent frames, ready for the LMDB ``poses`` key.
 
     The aligned poses of :func:`latent_frame_c2w` with translations scaled by
@@ -280,12 +357,12 @@ def latent_frame_poses(annotation: ClipAnnotation, fps: float) -> np.ndarray:
 
     Args:
         annotation (ClipAnnotation): the clip's annotation (w2c poses).
-        fps (float): source frame rate from the metadata.
+        source_frames (np.ndarray): ``(77,)`` source frame of each output pixel frame.
 
     Returns:
-        np.ndarray: ``(12, 7)`` float32 w2c OpenCV ``[tx, ty, tz, qx, qy, qz, qw]``.
+        np.ndarray: ``(20, 7)`` float32 w2c OpenCV ``[tx, ty, tz, qx, qy, qz, qw]``.
     """
-    return _lmdb_poses(latent_frame_c2w(annotation, fps))
+    return _lmdb_poses(latent_frame_c2w(annotation, source_frames))
 
 
 def nearest_annotation(frames: np.ndarray, targets: np.ndarray) -> np.ndarray:
@@ -320,6 +397,7 @@ def plan_clip(
     annotation: ClipAnnotation,
     meta: Mapping,
     *,
+    hdr: bool,
     min_window_path: float,
     max_dynamic_ratio: float,
 ) -> ClipPlan:
@@ -329,9 +407,11 @@ def plan_clip(
         annotation (ClipAnnotation): the clip's annotation.
         meta (Mapping): the clip's metadata row; uses ``id``, ``fps``, ``resolution`` and
             ``dynamicRatio``.
+        hdr (bool): whether the clip's video is HDR (:func:`video_is_hdr`); HDR clips are
+            skipped.
         min_window_path (float): skip the clip if the camera-centre path over the latent
-            frames of the training window, in metres before ``TRANSLATION_SCALE``, is below
-            this. Not evaluated for a clip too short to have the window.
+            frames of its window, in metres before ``TRANSLATION_SCALE``, is below this. Not
+            evaluated for a clip too short to have a window.
         max_dynamic_ratio (float): skip the clip if its ``dynamicRatio`` is above this.
 
     Returns:
@@ -347,27 +427,36 @@ def plan_clip(
     intrinsics = crop_intrinsics(annotation.intrinsics[0])
 
     reasons = []
-    c2w = path = None
-    if annotation.frames[-1] / fps < MIN_SPAN_SECONDS:
+    start = c2w = path = source_frames = None
+    starts = window_starts(annotation.frames, fps)
+    if len(starts) == 0:
         reasons.append(SKIP_SHORT_SPAN)
+    else:
+        start = int(annotation.frames[starts[choose_start(annotation.clip_id, len(starts))]])
+        source_frames = output_source_frames(fps, start)
+        c2w = latent_frame_c2w(annotation, source_frames)
+        path = window_path(c2w)
+    if hdr:
+        reasons.append(SKIP_HDR)
     if intrinsics[0] > MAX_CROPPED_FX:
         reasons.append(SKIP_LONG_FOCAL)
-    if SKIP_SHORT_SPAN not in reasons:
-        c2w = latent_frame_c2w(annotation, fps)
-        path = window_path(c2w)
-        if path < min_window_path:
-            reasons.append(SKIP_NEAR_STATIC)
+    if path is not None and path < min_window_path:
+        reasons.append(SKIP_NEAR_STATIC)
     if float(meta["dynamicRatio"]) > max_dynamic_ratio:
         reasons.append(SKIP_TOO_DYNAMIC)
     if reasons:
-        return ClipPlan(clip_id=annotation.clip_id, skip_reasons=tuple(reasons), window_path=path)
+        return ClipPlan(
+            clip_id=annotation.clip_id,
+            skip_reasons=tuple(reasons),
+            start_frame=start,
+            window_path=path,
+        )
 
-    source_frames = output_source_frames(fps)
-    latent_frames = source_frames[::PIXEL_FRAMES_PER_LATENT]
-    nearest = nearest_annotation(annotation.frames, latent_frames)
+    nearest = nearest_annotation(annotation.frames, source_frames[::PIXEL_FRAMES_PER_LATENT])
     return ClipPlan(
         clip_id=annotation.clip_id,
         skip_reasons=(),
+        start_frame=start,
         window_path=path,
         source_frames=source_frames,
         source_times=source_frames / fps,
@@ -377,11 +466,117 @@ def plan_clip(
     )
 
 
+def read_metadata(
+    path: str, *, group: int | None = None, clip_ids: set[str] | None = None
+) -> dict[str, dict[str, str]]:
+    """Read the rows of ``SpatialVID_HQ_metadata.csv`` for one group or a set of clip ids.
+
+    Args:
+        path (str): the metadata CSV.
+        group (int | None): keep only rows of this ``group id``.
+        clip_ids (set[str] | None): keep only rows with these ids.
+
+    Returns:
+        dict[str, dict[str, str]]: rows keyed by clip id, values as strings.
+    """
+    with open(path, newline="") as f:
+        return {
+            row["id"]: row
+            for row in csv.DictReader(f)
+            if (group is None or int(row["group id"]) == group)
+            and (clip_ids is None or row["id"] in clip_ids)
+        }
+
+
+def crop_resize_frame(frame: np.ndarray) -> np.ndarray:
+    """Centre-crop a 720×1280 frame to 720×1248, then area-resize it to 480×832.
+
+    Args:
+        frame (np.ndarray): ``(720, 1280, C)`` uint8 image.
+
+    Returns:
+        np.ndarray: ``(480, 832, C)`` uint8 image.
+
+    Raises:
+        ValueError: if the frame is not 720×1280.
+    """
+    import cv2
+
+    if frame.shape[:2] != (SOURCE_HEIGHT, SOURCE_WIDTH):
+        raise ValueError(f"frame is {frame.shape[1]}x{frame.shape[0]}, crop assumes 1280x720")
+    margin = (SOURCE_WIDTH - CROP_WIDTH) // 2
+    cropped = frame[:, margin : margin + CROP_WIDTH]
+    return cv2.resize(cropped, (OUTPUT_WIDTH, OUTPUT_HEIGHT), interpolation=cv2.INTER_AREA)
+
+
+def decode_clip_frames(video_path: str, source_frames: np.ndarray) -> np.ndarray:
+    """Decode the planned source frames of a clip, cropped and resized to 480×832.
+
+    Frames are decoded sequentially from the start of the video and counted in presentation
+    order, so the frame numbers match ``indexes.txt`` without relying on seeking. This decodes
+    ``source_frames.max() + 1`` frames, also when the window starts later in the clip.
+
+    Args:
+        video_path (str): the clip's mp4.
+        source_frames (np.ndarray): ``(T,)`` source frame numbers.
+
+    Returns:
+        np.ndarray: ``(T, 480, 832, 3)`` uint8 RGB.
+
+    Raises:
+        ValueError: if the video ends before the last requested frame.
+    """
+    import av
+
+    wanted: dict[int, list[int]] = {}
+    for pos, index in enumerate(np.asarray(source_frames).tolist()):
+        wanted.setdefault(index, []).append(pos)
+    last = max(wanted)
+    out = np.empty((len(source_frames), OUTPUT_HEIGHT, OUTPUT_WIDTH, 3), dtype=np.uint8)
+    count = 0
+    with av.open(video_path) as container:
+        stream = container.streams.video[0]
+        stream.thread_type = "AUTO"
+        for index, frame in enumerate(container.decode(stream)):
+            count = index + 1
+            if index in wanted:
+                image = crop_resize_frame(frame.to_ndarray(format="rgb24"))
+                for pos in wanted[index]:
+                    out[pos] = image
+            if index == last:
+                return out
+    raise ValueError(f"{video_path}: {count} frames decoded, need frame {last}")
+
+
+def load_caption(ann_dir: str, field: str) -> str:
+    """Read one caption field from a clip's ``caption.json``.
+
+    Args:
+        ann_dir (str): the clip's annotation directory.
+        field (str): one of ``CAPTION_FIELDS``.
+
+    Returns:
+        str: the caption text.
+
+    Raises:
+        ValueError: if ``field`` is not a caption field or the clip has no text for it.
+    """
+    import json
+
+    if field not in CAPTION_FIELDS:
+        raise ValueError(f"caption field {field!r} is not one of {CAPTION_FIELDS}")
+    with open(os.path.join(ann_dir, "caption.json")) as f:
+        text = json.load(f).get(field)
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError(f"{ann_dir}: caption.json has no {field}")
+    return text.strip()
+
+
 def _summarize(plan: ClipPlan, meta: Mapping) -> str:
     path = "n/a" if plan.window_path is None else f"{plan.window_path:.3f}"
     head = (
-        f"{plan.clip_id} fps={float(meta['fps']):.3f} window_path_m={path} "
-        f"dynamicRatio={float(meta['dynamicRatio']):.3f}"
+        f"{plan.clip_id} fps={float(meta['fps']):.3f} start={plan.start_frame} "
+        f"window_path_m={path} dynamicRatio={float(meta['dynamicRatio']):.3f}"
     )
     if plan.skipped:
         return f"{head} SKIP {','.join(plan.skip_reasons)}"
@@ -394,8 +589,16 @@ def _summarize(plan: ClipPlan, meta: Mapping) -> str:
     )
 
 
-def main() -> None:
-    """Plan a few clips of one group and print a one-line summary per clip."""
+def main(argv: list[str] | None = None) -> None:
+    """Plan the clips of one group, print a summary per clip, optionally save the kept ids.
+
+    A clip whose annotation breaks the contract (e.g. ``indexes.txt`` and ``poses.npy`` of
+    different lengths) is printed as an error, counted apart from the skips and left out of
+    ``--output``.
+
+    Args:
+        argv (list[str] | None): command-line arguments; ``None`` reads ``sys.argv``.
+    """
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--metadata", required=True, help="SpatialVID_HQ_metadata.csv")
     parser.add_argument(
@@ -403,23 +606,47 @@ def main() -> None:
         required=True,
         help="directory that the metadata 'annotation path' column is relative to",
     )
+    parser.add_argument(
+        "--videos_root",
+        required=True,
+        help="directory that the metadata 'video path' column is relative to",
+    )
     parser.add_argument("--group", type=int, required=True)
-    parser.add_argument("--num_clips", type=int, default=5)
+    parser.add_argument("--num_clips", type=int, default=None, help="first N ids; default all")
     parser.add_argument("--min_window_path", type=float, default=MIN_WINDOW_PATH)
     parser.add_argument("--max_dynamic_ratio", type=float, default=MAX_DYNAMIC_RATIO)
-    args = parser.parse_args()
+    parser.add_argument("--output", default=None, help="write kept clip ids here, one per line")
+    args = parser.parse_args(argv)
 
-    with open(args.metadata, newline="") as f:
-        rows = [row for row in csv.DictReader(f) if int(row["group id"]) == args.group]
-    for row in sorted(rows, key=lambda r: r["id"])[: args.num_clips]:
-        annotation = load_annotation(os.path.join(args.annotations_root, row["annotation path"]))
-        plan = plan_clip(
-            annotation,
-            row,
-            min_window_path=args.min_window_path,
-            max_dynamic_ratio=args.max_dynamic_ratio,
-        )
+    rows = read_metadata(args.metadata, group=args.group)
+    clip_ids = sorted(rows)[: args.num_clips]
+    kept, skipped, errors = [], 0, 0
+    for clip_id in clip_ids:
+        row = rows[clip_id]
+        try:
+            annotation = load_annotation(
+                os.path.join(args.annotations_root, row["annotation path"])
+            )
+            plan = plan_clip(
+                annotation,
+                row,
+                hdr=video_is_hdr(os.path.join(args.videos_root, row["video path"])),
+                min_window_path=args.min_window_path,
+                max_dynamic_ratio=args.max_dynamic_ratio,
+            )
+        except ValueError as e:
+            print(f"{clip_id} ERROR {e}")
+            errors += 1
+            continue
         print(_summarize(plan, row))
+        if plan.skipped:
+            skipped += 1
+        else:
+            kept.append(clip_id)
+    print(f"kept {len(kept)}, skipped {skipped}, errors {errors} of {len(clip_ids)}")
+    if args.output:
+        with open(args.output, "w") as f:
+            f.writelines(f"{clip_id}\n" for clip_id in kept)
 
 
 if __name__ == "__main__":
