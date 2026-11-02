@@ -12,9 +12,10 @@ Takes the clip ids that ``spatialvid.py`` kept and writes, per clip, the keys of
 The layout matches ``build_worldplaygen_lmdb.py``: ``<key>_shape`` plus ``<key>_<i>_data``. Each
 rank streams into its own shard, then rank 0 merges the shards into ``<output_dir>/data``.
 
-Per rank, DataLoader workers plan, decode, crop and resize clips while the main process runs
-the VAE and writes the LMDB. Each clip logs how long the main process waited for it, how long
-a worker took to decode it, and how long the encode and the write took.
+Per rank, DataLoader workers plan, decode, crop and resize clips, the main process runs the VAE,
+and a writer thread commits each sample to the LMDB while the next clip is encoded. Each clip
+logs how long the main process waited for it, how long a worker took to decode it, and how long
+the encode and the write took.
 
 Usage (from the repo root, as a module so ``tools.data.wan21.spatialvid`` resolves)::
 
@@ -191,6 +192,9 @@ def write_shard(
 ) -> tuple[int, list[str]]:
     """Encode every item of ``loader`` into ``env``, logging per-clip timing.
 
+    A writer thread commits each sample while the next clip is encoded, so the GPU does not
+    idle during the LMDB write. Samples keep the loader's order.
+
     Args:
         loader (Any): iterable of :class:`ClipDataset` items, e.g. a DataLoader.
         env (Any): the ``lmdb`` environment of this rank's shard.
@@ -202,36 +206,59 @@ def write_shard(
         tuple[int, list[str]]: samples written and the clip ids that failed. ``__count__`` and
         ``__failed__`` are also stored in ``env``.
     """
-    count, failed = 0, []
+    import queue
+    import threading
+
+    pending: queue.Queue = queue.Queue(maxsize=2)
+    written, failed = [0], []
+
+    def _writer() -> None:
+        while (job := pending.get()) is not None:
+            sample, timing = job
+            clip_id = sample["clip_ids"]
+            t0 = time.perf_counter()
+            try:
+                with env.begin(write=True) as txn:
+                    put_sample(txn, written[0], sample)
+            except Exception as e:
+                print(f"{log_prefix}{clip_id} failed: {e!r}", flush=True)
+                failed.append(clip_id)
+                continue
+            written[0] += 1
+            print(f"{timing} write={time.perf_counter() - t0:.2f}s", flush=True)
+
+    writer = threading.Thread(target=_writer, daemon=True)
+    writer.start()
     total = len(loader) if hasattr(loader, "__len__") else "?"
     t_wait = time.perf_counter()
-    for i, item in enumerate(loader):
-        wait = time.perf_counter() - t_wait
-        clip_id = item["clip_ids"]
-        if item["error"]:
-            print(f"{log_prefix}{clip_id} failed: {item['error']}", flush=True)
-            failed.append(clip_id)
+    try:
+        for i, item in enumerate(loader):
+            wait = time.perf_counter() - t_wait
+            clip_id = item["clip_ids"]
+            if item["error"]:
+                print(f"{log_prefix}{clip_id} failed: {item['error']}", flush=True)
+                failed.append(clip_id)
+                t_wait = time.perf_counter()
+                continue
+            try:
+                t0 = time.perf_counter()
+                sample = encode_item(item, vae, device)
+                t1 = time.perf_counter()
+            except Exception as e:
+                print(f"{log_prefix}{clip_id} failed: {e!r}", flush=True)
+                failed.append(clip_id)
+                t_wait = time.perf_counter()
+                continue
+            timing = (
+                f"{log_prefix}{i + 1}/{total} {clip_id} wait={wait:.2f}s "
+                f"decode={float(item['decode_s']):.2f}s encode={t1 - t0:.2f}s"
+            )
+            pending.put((sample, timing))
             t_wait = time.perf_counter()
-            continue
-        try:
-            t0 = time.perf_counter()
-            sample = encode_item(item, vae, device)
-            t1 = time.perf_counter()
-            with env.begin(write=True) as txn:
-                put_sample(txn, count, sample)
-            t2 = time.perf_counter()
-        except Exception as e:
-            print(f"{log_prefix}{clip_id} failed: {e!r}", flush=True)
-            failed.append(clip_id)
-            t_wait = time.perf_counter()
-            continue
-        count += 1
-        print(
-            f"{log_prefix}{i + 1}/{total} {clip_id} wait={wait:.2f}s "
-            f"decode={float(item['decode_s']):.2f}s encode={t1 - t0:.2f}s write={t2 - t1:.2f}s",
-            flush=True,
-        )
-        t_wait = time.perf_counter()
+    finally:
+        pending.put(None)
+        writer.join()
+    count = written[0]
     with env.begin(write=True) as txn:
         txn.put(b"__count__", str(count).encode())
         txn.put(b"__failed__", "\n".join(failed).encode())
