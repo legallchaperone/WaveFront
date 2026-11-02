@@ -16,7 +16,7 @@ Usage::
     python tools/data/wan21/spatialvid.py \\
         --metadata /path/SpatialVID-HQ/data/train/SpatialVID_HQ_metadata.csv \\
         --annotations_root /path/SpatialVID-HQ/extracted/annotations/SpatialVID \\
-        --group 1 --num_clips 5 --min_move_dist 0.1 --max_dynamic_ratio 0.3
+        --group 1 --num_clips 5
 """
 
 import argparse
@@ -36,6 +36,9 @@ SOURCE_WIDTH, SOURCE_HEIGHT = 1280, 720
 CROP_WIDTH = 1248
 MAX_CROPPED_FX = 1.5
 TRANSLATION_SCALE = 1.54
+# CLI defaults only; plan_clip takes both thresholds explicitly.
+MIN_WINDOW_PATH = 0.05
+MAX_DYNAMIC_RATIO = 0.3
 
 SKIP_SHORT_SPAN = "short_span"
 SKIP_LONG_FOCAL = "long_focal"
@@ -71,6 +74,8 @@ class ClipPlan:
     Attributes:
         clip_id (str): clip id.
         skip_reasons (tuple[str, ...]): every ``SKIP_*`` reason that applies; empty if kept.
+        window_path (float | None): camera-centre path over the latent frames of the training
+            window in metres (before ``TRANSLATION_SCALE``); ``None`` if the clip is too short.
         source_frames (np.ndarray | None): ``(45,)`` int64 source frame of each output pixel
             frame.
         source_times (np.ndarray | None): ``(45,)`` float64 time in seconds of those frames.
@@ -84,6 +89,7 @@ class ClipPlan:
 
     clip_id: str
     skip_reasons: tuple[str, ...]
+    window_path: float | None = None
     source_frames: np.ndarray | None = None
     source_times: np.ndarray | None = None
     poses: np.ndarray | None = None
@@ -235,12 +241,42 @@ def interpolate_c2w(c2w: np.ndarray, frames: np.ndarray, targets: np.ndarray) ->
     return out
 
 
+def latent_frame_c2w(annotation: ClipAnnotation, fps: float) -> np.ndarray:
+    """c2w poses of the latent frames in metres, aligned so latent frame 0 is the identity.
+
+    Latent frame ``k`` takes output pixel frame ``4k`` at its actual source time, interpolated
+    between the neighbouring annotation frames.
+
+    Args:
+        annotation (ClipAnnotation): the clip's annotation (w2c poses).
+        fps (float): source frame rate from the metadata.
+
+    Returns:
+        np.ndarray: ``(12, 4, 4)`` float64 aligned c2w poses, translations in metres.
+    """
+    targets = output_source_frames(fps)[::PIXEL_FRAMES_PER_LATENT]
+    c2w = interpolate_c2w(
+        invert_rigid(pose_vec_to_matrix(annotation.poses)), annotation.frames, targets
+    )
+    return invert_rigid(c2w[0]) @ c2w
+
+
+def window_path(c2w: np.ndarray) -> float:
+    """Path length of the camera centres of ``(T, 4, 4)`` c2w poses, in their units."""
+    return float(np.linalg.norm(np.diff(c2w[:, :3, 3], axis=0), axis=1).sum())
+
+
+def _lmdb_poses(c2w: np.ndarray) -> np.ndarray:
+    scaled = c2w.copy()
+    scaled[:, :3, 3] *= TRANSLATION_SCALE
+    return matrix_to_pose_vec(invert_rigid(scaled)).astype(np.float32)
+
+
 def latent_frame_poses(annotation: ClipAnnotation, fps: float) -> np.ndarray:
     """Poses of the latent frames, ready for the LMDB ``poses`` key.
 
-    Latent frame ``k`` takes output pixel frame ``4k`` at its actual source time, interpolated
-    between the neighbouring annotation frames, then the trajectory is aligned so latent frame 0
-    is the identity and its translations are scaled by ``TRANSLATION_SCALE``.
+    The aligned poses of :func:`latent_frame_c2w` with translations scaled by
+    ``TRANSLATION_SCALE``, as w2c.
 
     Args:
         annotation (ClipAnnotation): the clip's annotation (w2c poses).
@@ -249,13 +285,7 @@ def latent_frame_poses(annotation: ClipAnnotation, fps: float) -> np.ndarray:
     Returns:
         np.ndarray: ``(12, 7)`` float32 w2c OpenCV ``[tx, ty, tz, qx, qy, qz, qw]``.
     """
-    targets = output_source_frames(fps)[::PIXEL_FRAMES_PER_LATENT]
-    c2w = interpolate_c2w(
-        invert_rigid(pose_vec_to_matrix(annotation.poses)), annotation.frames, targets
-    )
-    aligned = invert_rigid(c2w[0]) @ c2w
-    aligned[:, :3, 3] *= TRANSLATION_SCALE
-    return matrix_to_pose_vec(invert_rigid(aligned)).astype(np.float32)
+    return _lmdb_poses(latent_frame_c2w(annotation, fps))
 
 
 def nearest_annotation(frames: np.ndarray, targets: np.ndarray) -> np.ndarray:
@@ -290,16 +320,18 @@ def plan_clip(
     annotation: ClipAnnotation,
     meta: Mapping,
     *,
-    min_move_dist: float,
+    min_window_path: float,
     max_dynamic_ratio: float,
 ) -> ClipPlan:
     """Plan one clip under the SpatialVID data contract.
 
     Args:
         annotation (ClipAnnotation): the clip's annotation.
-        meta (Mapping): the clip's metadata row; uses ``id``, ``fps``, ``resolution``,
-            ``moveDist`` and ``dynamicRatio``.
-        min_move_dist (float): skip the clip if its ``moveDist`` is below this.
+        meta (Mapping): the clip's metadata row; uses ``id``, ``fps``, ``resolution`` and
+            ``dynamicRatio``.
+        min_window_path (float): skip the clip if the camera-centre path over the latent
+            frames of the training window, in metres before ``TRANSLATION_SCALE``, is below
+            this. Not evaluated for a clip too short to have the window.
         max_dynamic_ratio (float): skip the clip if its ``dynamicRatio`` is above this.
 
     Returns:
@@ -315,16 +347,20 @@ def plan_clip(
     intrinsics = crop_intrinsics(annotation.intrinsics[0])
 
     reasons = []
+    c2w = path = None
     if annotation.frames[-1] / fps < MIN_SPAN_SECONDS:
         reasons.append(SKIP_SHORT_SPAN)
     if intrinsics[0] > MAX_CROPPED_FX:
         reasons.append(SKIP_LONG_FOCAL)
-    if float(meta["moveDist"]) < min_move_dist:
-        reasons.append(SKIP_NEAR_STATIC)
+    if SKIP_SHORT_SPAN not in reasons:
+        c2w = latent_frame_c2w(annotation, fps)
+        path = window_path(c2w)
+        if path < min_window_path:
+            reasons.append(SKIP_NEAR_STATIC)
     if float(meta["dynamicRatio"]) > max_dynamic_ratio:
         reasons.append(SKIP_TOO_DYNAMIC)
     if reasons:
-        return ClipPlan(clip_id=annotation.clip_id, skip_reasons=tuple(reasons))
+        return ClipPlan(clip_id=annotation.clip_id, skip_reasons=tuple(reasons), window_path=path)
 
     source_frames = output_source_frames(fps)
     latent_frames = source_frames[::PIXEL_FRAMES_PER_LATENT]
@@ -332,24 +368,28 @@ def plan_clip(
     return ClipPlan(
         clip_id=annotation.clip_id,
         skip_reasons=(),
+        window_path=path,
         source_frames=source_frames,
         source_times=source_frames / fps,
-        poses=latent_frame_poses(annotation, fps),
+        poses=_lmdb_poses(c2w),
         intrinsics=intrinsics,
         depth_indices=annotation.indices[nearest],
     )
 
 
 def _summarize(plan: ClipPlan, meta: Mapping) -> str:
-    head = f"{plan.clip_id} fps={float(meta['fps']):.3f} moveDist={float(meta['moveDist']):.3f}"
+    path = "n/a" if plan.window_path is None else f"{plan.window_path:.3f}"
+    head = (
+        f"{plan.clip_id} fps={float(meta['fps']):.3f} window_path_m={path} "
+        f"dynamicRatio={float(meta['dynamicRatio']):.3f}"
+    )
     if plan.skipped:
         return f"{head} SKIP {','.join(plan.skip_reasons)}"
     centres = invert_rigid(pose_vec_to_matrix(plan.poses))[:, :3, 3] / TRANSLATION_SCALE
-    path = np.linalg.norm(np.diff(centres, axis=0), axis=1).sum()
     angle = np.degrees(2 * np.arccos(np.clip(abs(plan.poses[-1, 6]), 0, 1)))
     return (
         f"{head} intrinsics={np.round(plan.intrinsics, 4).tolist()} "
-        f"path_m={path:.3f} end_centre_m={np.round(centres[-1], 3).tolist()} "
+        f"end_centre_m={np.round(centres[-1], 3).tolist()} "
         f"end_rot_deg={angle:.1f} depth_indices={plan.depth_indices.tolist()}"
     )
 
@@ -365,8 +405,8 @@ def main() -> None:
     )
     parser.add_argument("--group", type=int, required=True)
     parser.add_argument("--num_clips", type=int, default=5)
-    parser.add_argument("--min_move_dist", type=float, required=True)
-    parser.add_argument("--max_dynamic_ratio", type=float, required=True)
+    parser.add_argument("--min_window_path", type=float, default=MIN_WINDOW_PATH)
+    parser.add_argument("--max_dynamic_ratio", type=float, default=MAX_DYNAMIC_RATIO)
     args = parser.parse_args()
 
     with open(args.metadata, newline="") as f:
@@ -376,7 +416,7 @@ def main() -> None:
         plan = plan_clip(
             annotation,
             row,
-            min_move_dist=args.min_move_dist,
+            min_window_path=args.min_window_path,
             max_dynamic_ratio=args.max_dynamic_ratio,
         )
         print(_summarize(plan, row))

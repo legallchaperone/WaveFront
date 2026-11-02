@@ -26,7 +26,7 @@ from tools.data.wan21.spatialvid import (
     pose_vec_to_matrix,
 )
 
-KEEP_ALL = dict(min_move_dist=0.0, max_dynamic_ratio=1.0)
+KEEP_ALL = dict(min_window_path=0.0, max_dynamic_ratio=1.0)
 INTRINSICS = [0.5, 0.5 * 16 / 9, 0.5, 0.5]
 
 
@@ -60,12 +60,11 @@ def _annotation(c2w: np.ndarray, frames, intrinsics=None, clip_id="clip") -> Cli
     )
 
 
-def _meta(clip_id="clip", fps=30.0, move_dist=1.0, dynamic_ratio=0.1, resolution="1280x720"):
+def _meta(clip_id="clip", fps=30.0, dynamic_ratio=0.1, resolution="1280x720"):
     return {
         "id": clip_id,
         "fps": str(fps),
         "resolution": resolution,
-        "moveDist": str(move_dist),
         "dynamicRatio": str(dynamic_ratio),
     }
 
@@ -223,10 +222,10 @@ def test_crop_intrinsics_formula():
 # --- skip reasons and errors -------------------------------------------------------------------
 
 
-def _plan(fps=30.0, last_frame=90, step=5, intrinsics=None, **meta):
+def _plan(fps=30.0, last_frame=90, step=5, intrinsics=None, speed=0.5, **meta):
     frames = np.arange(0, last_frame + 1, step)
-    ann = _annotation(_forward_trajectory(frames, fps), frames, intrinsics=intrinsics)
-    return plan_clip(ann, _meta(fps=fps, **meta), min_move_dist=0.05, max_dynamic_ratio=0.3)
+    ann = _annotation(_forward_trajectory(frames, fps, speed=speed), frames, intrinsics=intrinsics)
+    return plan_clip(ann, _meta(fps=fps, **meta), min_window_path=0.05, max_dynamic_ratio=0.3)
 
 
 def test_kept_clip_has_full_plan():
@@ -251,19 +250,58 @@ def test_skip_long_focal():
     assert _plan(intrinsics=[1.47, 2.6, 0.5, 0.5]).skip_reasons == (SKIP_LONG_FOCAL,)
 
 
-def test_skip_metadata_filters_and_multiple_reasons():
-    assert _plan(move_dist=0.01).skip_reasons == (SKIP_NEAR_STATIC,)
-    assert _plan(dynamic_ratio=0.5).skip_reasons == (SKIP_TOO_DYNAMIC,)
-    plan = _plan(last_frame=60, move_dist=0.0, dynamic_ratio=0.9)
-    assert plan.skip_reasons == (SKIP_SHORT_SPAN, SKIP_NEAR_STATIC, SKIP_TOO_DYNAMIC)
+def test_skip_near_static_on_window_path():
+    # 30 fps: the last latent frame is source frame 83, so the window path is speed·83/30.
+    assert output_source_frames(30.0)[-1] == 83
+    kept = _plan(speed=0.0185)
+    np.testing.assert_allclose(kept.window_path, 0.0185 * 83 / 30, rtol=1e-9)
+    assert not kept.skipped
+    slow = _plan(speed=0.018)
+    assert slow.skip_reasons == (SKIP_NEAR_STATIC,)
+    np.testing.assert_allclose(slow.window_path, 0.018 * 83 / 30, rtol=1e-9)
+
+
+def test_window_path_ignores_motion_after_the_window():
+    # Static for the first 3 s, then 10 m/s: whole-clip motion is large, the window is still.
+    fps = 30.0
+    frames = np.arange(0, 451, 5)
+    c2w = np.stack([_rigid(np.eye(3), [0, 0, 10 * max(f / fps - 3.0, 0.0)]) for f in frames])
+    plan = plan_clip(
+        _annotation(c2w, frames), _meta(fps=fps), min_window_path=0.05, max_dynamic_ratio=0.3
+    )
+    assert plan.skip_reasons == (SKIP_NEAR_STATIC,)
+    assert plan.window_path == pytest.approx(0.0, abs=1e-12)
+
+
+def test_window_path_matches_lmdb_poses():
+    plan = _plan(fps=29.97, speed=0.7)
+    centres = invert_rigid(pose_vec_to_matrix(plan.poses))[:, :3, 3] / TRANSLATION_SCALE
+    path = np.linalg.norm(np.diff(centres, axis=0), axis=1).sum()
+    assert plan.window_path == pytest.approx(path, rel=1e-5)
+
+
+def test_skip_too_dynamic_boundary():
+    assert not _plan(dynamic_ratio=0.3).skipped
+    assert _plan(dynamic_ratio=0.31).skip_reasons == (SKIP_TOO_DYNAMIC,)
+
+
+def test_multiple_reasons_and_short_clip_has_no_window_path():
+    plan = _plan(last_frame=60, speed=0.0, dynamic_ratio=0.9, intrinsics=[1.6, 2.8, 0.5, 0.5])
+    assert plan.skip_reasons == (SKIP_SHORT_SPAN, SKIP_LONG_FOCAL, SKIP_TOO_DYNAMIC)
+    assert plan.window_path is None
     assert plan.poses is None and plan.intrinsics is None and plan.depth_indices is None
+    plan = _plan(speed=0.0, dynamic_ratio=0.9)
+    assert plan.skip_reasons == (SKIP_NEAR_STATIC, SKIP_TOO_DYNAMIC)
+    assert plan.window_path == pytest.approx(0.0, abs=1e-12)
 
 
-def test_metadata_thresholds_have_no_default():
+def test_thresholds_have_no_default():
     frames = np.arange(0, 91, 5)
     ann = _annotation(_forward_trajectory(frames, 30.0), frames)
     with pytest.raises(TypeError):
         plan_clip(ann, _meta())
+    with pytest.raises(TypeError):
+        plan_clip(ann, _meta(), min_move_dist=0.05, max_dynamic_ratio=0.3)
 
 
 def test_varying_intrinsics_is_an_error():
