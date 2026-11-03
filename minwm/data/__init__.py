@@ -21,6 +21,7 @@ _DATASET_NAMES = {
     "ShardingLMDBDataset",
     "CameraLatentLMDBDataset",
     "CameraODERegressionLMDBDataset",
+    "CameraDisparityLMDBDataset",
     "TextImagePairDataset",
     "MockCameraLatentDataset",
     "CameraPluckerDataset",

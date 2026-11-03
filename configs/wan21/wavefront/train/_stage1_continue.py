@@ -5,8 +5,8 @@ the training budget, the validation cadence and the W&B group. The model,
 optimizer, learning rate and batch size come from the Stage 1 config. Each run
 adds only what it changes, plus its output dir and W&B tags.
 
-Data: SpatialVID LMDBs, not in the repo yet. Baseline 2 also reads a
-``disparity`` key per sample; baseline 1 ignores it.
+Data: the SpatialVID main LMDBs. Baseline 2 also reads dense disparity from separate
+disparity LMDBs (see ``b2_joint_depth.py``); baseline 1 does not.
 """
 
 _base_ = "../../action2v/train/stage1_ar_tf.py"

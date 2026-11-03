@@ -230,9 +230,25 @@ def test_baseline_configs_load_and_share_their_setup():
     assert not b1["model"].get("use_disparity", False)
     assert b1["recipe"]["loss"] == stage1["recipe"]["loss"]
     assert b1["recipe"]["batch_preprocessors"] == stage1["recipe"]["batch_preprocessors"]
-    # Everything but the run's own changes must match between baselines 1 and 2.
-    for section in ("checkpoint", "data"):
-        assert b1[section] == real[section], section
+    # Everything but the run's own changes must match between baselines 1 and 2. Baseline 2
+    # reads the same main LMDBs, joined with their disparity LMDBs.
+    assert b1["checkpoint"] == real["checkpoint"]
+    for key, split in (("dataset", "train"), ("val_dataset", "val")):
+        main = {
+            "type": "CameraLatentLMDBDataset",
+            "data_path": f"./dataset/WaveFront/spatialvid/{split}",
+        }
+        assert b1["data"][key] == main
+        assert real["data"][key] == {
+            **main,
+            "type": "CameraDisparityLMDBDataset",
+            "disparity_path": f"./dataset/WaveFront/spatialvid/{split}_disparity",
+        }
+
+    def loader(cfg):
+        return {k: v for k, v in cfg["data"].items() if k not in ("dataset", "val_dataset")}
+
+    assert loader(b1) == loader(real)
     for cfg in (b1, real):
         cfg["training"].pop("output_dir")
         for key in ("wandb_tags", "wandb_notes"):

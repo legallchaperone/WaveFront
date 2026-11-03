@@ -17,6 +17,7 @@ _EXPORTS = {
     "ShardingLMDBDataset": ".lmdb",
     "CameraLatentLMDBDataset": ".lmdb",
     "CameraODERegressionLMDBDataset": ".lmdb",
+    "CameraDisparityLMDBDataset": ".lmdb",
     "TextImagePairDataset": ".image",
     "MockCameraLatentDataset": ".mock",
     "CameraPluckerDataset": ".camera_pt",

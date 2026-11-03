@@ -16,6 +16,8 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
+from minwm.processors import DISP_UNSHUFFLE
+
 from .geometry import build_viewmats_and_Ks as _build_viewmats_and_Ks
 
 # ---------------------------------------------------------------------------
@@ -249,3 +251,78 @@ class CameraLatentLMDBDataset(Dataset):
             "viewmats": torch.tensor(viewmats, dtype=torch.float32),
             "Ks": torch.tensor(Ks, dtype=torch.float32),
         }
+
+
+class CameraDisparityLMDBDataset(CameraLatentLMDBDataset):
+    """:class:`CameraLatentLMDBDataset` samples that have a dense disparity label, plus the label.
+
+    The disparity LMDB holds ``disparity`` (N,F,1,4H,4W) float16 and ``clip_ids`` (N,) str,
+    written by ``tools/data/wan21/build_spatialvid_disparity_lmdb.py``: a subset of the main
+    LMDB's clips in the main LMDB's relative order. Main samples without a label are left out.
+    Each item carries ``disparity`` ``[F, 1, 4H, 4W]`` float32 in ``[0, 1]``, the key and
+    layout :class:`~minwm.processors.DisparityChannel` reads.
+
+    Args:
+        data_path (str): the main LMDB, a single LMDB directory with ``clip_ids``.
+        disparity_path (str): the disparity LMDB, a single LMDB directory.
+        max_pair (int): cap on the number of samples.
+
+    Raises:
+        ValueError: if either LMDB is sharded, the disparity shape does not match the latent
+            grid, the main LMDB repeats a clip id, or a disparity clip id is missing from the
+            main LMDB or out of its order.
+    """
+
+    def __init__(self, data_path: str, disparity_path: str, max_pair: int = int(1e8)):
+        for path in (data_path, disparity_path):
+            if not _is_single_lmdb(path):
+                raise ValueError(f"{path}: expected a single LMDB directory (with data.mdb)")
+        super().__init__(data_path, max_pair)
+        self._disp_env = _open(disparity_path)
+        self._disp_shape = _get_shape(self._disp_env, "disparity")
+        frames, _, height, width = self._ds.latents_shape[-4:]
+        expected = (frames, 1, DISP_UNSHUFFLE * height, DISP_UNSHUFFLE * width)
+        if self._disp_shape[1:] != expected:
+            raise ValueError(
+                f"{disparity_path}: disparity is {self._disp_shape[1:]} per sample, "
+                f"want {expected} for latents {self._ds.latents_shape[1:]}"
+            )
+        num_labels = _get_shape(self._disp_env, "clip_ids")[0]
+        if num_labels != self._disp_shape[0]:
+            raise ValueError(
+                f"{disparity_path}: {self._disp_shape[0]} disparity rows, {num_labels} clip ids"
+            )
+
+        main_index: dict[str, int] = {}
+        for i in range(_get_shape(self._ds.env, "clip_ids")[0]):
+            clip_id = _get_row(self._ds.env, "clip_ids", str, i)
+            if clip_id in main_index:
+                raise ValueError(
+                    f"{data_path}: clip {clip_id} at samples {main_index[clip_id]}, {i}"
+                )
+            main_index[clip_id] = i
+        self._main_rows: list[int] = []
+        for j in range(num_labels):
+            clip_id = _get_row(self._disp_env, "clip_ids", str, j)
+            if clip_id not in main_index:
+                raise ValueError(f"{disparity_path}: clip {clip_id} (label {j}) not in {data_path}")
+            if self._main_rows and main_index[clip_id] <= self._main_rows[-1]:
+                raise ValueError(
+                    f"{disparity_path}: clip {clip_id} (label {j}) is main sample "
+                    f"{main_index[clip_id]}, not after {self._main_rows[-1]}: out of order"
+                )
+            self._main_rows.append(main_index[clip_id])
+
+    def __len__(self) -> int:
+        return min(len(self._main_rows), self.max_pair)
+
+    def __getitem__(self, idx: int) -> dict:
+        row = self._main_rows[idx]
+        main_id = _get_row(self._ds.env, "clip_ids", str, row)
+        label_id = _get_row(self._disp_env, "clip_ids", str, idx)
+        if main_id != label_id:
+            raise RuntimeError(f"label {idx} is clip {label_id}, main sample {row} is {main_id}")
+        sample = super().__getitem__(row)
+        disparity = _get_row(self._disp_env, "disparity", np.float16, idx, self._disp_shape[1:])
+        sample["disparity"] = torch.tensor(disparity, dtype=torch.float32)
+        return sample

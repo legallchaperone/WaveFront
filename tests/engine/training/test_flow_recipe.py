@@ -6,6 +6,7 @@ These guard the build path the trainer uses (``minwm.config.lazy.build`` ->
 them to its FlowMatchingScheduler through the shared flow base.
 """
 
+import pytest
 import torch
 
 from minwm.config.lazy import build
@@ -196,8 +197,10 @@ class TestARTFValidation:
 
 
 class TestARTFDisparityTraining:
-    def test_first_step_reaches_both_disparity_branches(self, monkeypatch):
-        """Mock clip -> DisparityChannel chain -> tiny use_disparity model -> joint loss."""
+    @pytest.mark.parametrize("source", ["mock", "lmdb"])
+    def test_first_step_reaches_both_disparity_branches(self, monkeypatch, tmp_path, source):
+        """Clip (mock, or LMDB joined with disparity) -> DisparityChannel chain -> tiny
+        use_disparity model -> joint loss."""
         from torch.nn.attention.flex_attention import flex_attention
         from torch.utils.data import default_collate
 
@@ -226,9 +229,18 @@ class TestARTFDisparityTraining:
         )
         with torch.no_grad():
             model.head.head.weight.normal_(std=0.1)  # as from a trained Stage 1 checkpoint
-        dataset = MockCameraLatentDataset(
-            length=1, num_frames=4, height=4, width=4, with_camera=False, with_disparity=True
-        )
+        if source == "mock":
+            dataset = MockCameraLatentDataset(
+                length=1, num_frames=4, height=4, width=4, with_camera=False, with_disparity=True
+            )
+        else:
+            pytest.importorskip("lmdb")
+            from minwm.data.datasets.lmdb import CameraDisparityLMDBDataset
+            from tests.data.test_camera_disparity_lmdb import _disparity_lmdb, _main_lmdb
+
+            dataset = CameraDisparityLMDBDataset(
+                _main_lmdb(tmp_path / "main"), _disparity_lmdb(tmp_path / "disp", ["clip-a"])[0]
+            )
         recipe = ARTFRecipe(
             loss=JointFlowMatchingLoss(),
             adapter=Wan21Adapter(causal=True, text_len=8, text_dim=64, dtype="float32"),
