@@ -466,6 +466,36 @@ def plan_clip(
     )
 
 
+def plan_lmdb_clip(row: Mapping, annotations_root: str, videos_root: str) -> ClipPlan:
+    """Plan a selected clip the way every LMDB pass does: only the contract skips apply.
+
+    Selection (window path, ``dynamicRatio``) already happened in :func:`main`, so both
+    thresholds are disabled here. Every pass over the same clip gets the same window and depth
+    frames from this one function.
+
+    Args:
+        row (Mapping): the clip's metadata row.
+        annotations_root (str): directory the ``annotation path`` column is relative to.
+        videos_root (str): directory the ``video path`` column is relative to.
+
+    Returns:
+        ClipPlan: the plan of a kept clip.
+
+    Raises:
+        ValueError: if the annotation breaks the contract or a contract rule skips the clip.
+    """
+    plan = plan_clip(
+        load_annotation(os.path.join(annotations_root, row["annotation path"])),
+        row,
+        hdr=video_is_hdr(os.path.join(videos_root, row["video path"])),
+        min_window_path=0.0,
+        max_dynamic_ratio=1.0,
+    )
+    if plan.skipped:
+        raise ValueError(f"{plan.clip_id}: skipped by the planner {plan.skip_reasons}")
+    return plan
+
+
 def read_metadata(
     path: str, *, group: int | None = None, clip_ids: set[str] | None = None
 ) -> dict[str, dict[str, str]]:

@@ -44,11 +44,9 @@ from tools.data.wan21.spatialvid import (
     DEFAULT_CAPTION_FIELD,
     NUM_LATENT_FRAMES,
     decode_clip_frames,
-    load_annotation,
     load_caption,
-    plan_clip,
+    plan_lmdb_clip,
     read_metadata,
-    video_is_hdr,
 )
 
 LATENT_SHAPE = (NUM_LATENT_FRAMES, 16, 60, 104)
@@ -77,20 +75,12 @@ def prepare_clip(
         ``prompts``, ``clip_ids`` and ``decode_s`` (seconds spent decoding).
 
     Raises:
-        ValueError: if a contract rule skips the clip (selection already happened in
-            ``spatialvid.py``, so only the contract skips can fire here).
+        ValueError: if a contract rule skips the clip (see
+            :func:`~tools.data.wan21.spatialvid.plan_lmdb_clip`).
     """
     ann_dir = os.path.join(annotations_root, row["annotation path"])
     video_path = os.path.join(videos_root, row["video path"])
-    plan = plan_clip(
-        load_annotation(ann_dir),
-        row,
-        hdr=video_is_hdr(video_path),
-        min_window_path=0.0,
-        max_dynamic_ratio=1.0,
-    )
-    if plan.skipped:
-        raise ValueError(f"{plan.clip_id}: skipped by the planner {plan.skip_reasons}")
+    plan = plan_lmdb_clip(row, annotations_root, videos_root)
     t0 = time.perf_counter()
     frames = decode_clip_frames(video_path, plan.source_frames)
     return {
