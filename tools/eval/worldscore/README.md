@@ -163,6 +163,22 @@ VBENCH_CACHE_DIR=$WORK/.cache/vbench $WORK/venvs/vbench/bin/python \
 - **像素**：d 在 1 截断，d ≥ 0.999 的不算；d 或 r 低于 0.02 的不算（天空和远景：d = 0.9·(1/z)/P₉₀，即深度超过第一个 chunk P₉₀ 处深度的 45 倍，深度比值在这里发散）。`valid_fraction` 记每帧留下的比例。
 - **指标**：以 r 为参照，AbsRel 按深度算（mean |1/d − 1/r| / (1/r)），δ<1.25 是 max(d/r, r/d) < 1.25 的比例（在深度和 disparity 上相同）。逐帧记在 `frames` 里，`abs_rel`、`delta1` 是各帧的平均。看逐帧曲线能分出"一开始就不对"和"越往后越漂"。
 
+## 并排看几个 run（`report.py`）
+
+几个 run 评的是同一批样例（比如原版 minWM、①、② 各跑一次 `run_small.sh`）时，`report.py` 生成一个静态 HTML 文件夹，拷回本地直接用浏览器打开：
+
+```bash
+python tools/eval/worldscore/report.py --out $WORK/outputs/WaveFront/report-2026-11-05 \
+  --run minwm=$WORK/outputs/WaveFront/<原版 run> --run b1=$WORK/outputs/WaveFront/<① run> \
+  --run b2=$WORK/outputs/WaveFront/<② run>
+rsync -a delta:/work/hdd/bjki/wchen38/outputs/WaveFront/report-2026-11-05 ./local/
+```
+
+- **汇总表**：按相机运动类型（以及有视差 / 无视差 / 全部）列每个 run 各指标的均值，和每个 run 减第一个 run（基准）的**配对**差：只用两个 run 都有分数的样例，给均值和对样例做 bootstrap 的 95% CI。CI 不含 0 时按指标方向标绿（更好）或红（更差）。每种运动只有 8 个样例，percentile bootstrap 偏窄，颜色只说明该去看哪里。
+- **每个样例**：prompt、运动类型、seed，各 run 的视频并排（② 旁边是 d 的彩色视频，近处红、远处蓝，每个 latent 帧的 d 持续它那 4 个像素帧，和 RGB 同步），「play row」从头同步播放一行；下面是这个样例各 run 的指标：WorldScore 的相机旋转 / 平移误差、重投影误差（3D 一致性）、光流 AEPE，VBench 四个维度，② 的 disparity 自洽。
+- **seed**：每个样例的 seed 由样例 id 决定（`prepare.py` 写进 benchmark JSON），所有 run 相同；② 的噪声先抽 RGB 的 16 个通道，所以 RGB 噪声也和原版、① 相同。某个 run 的 `gen/manifest.json` 记的 seed 对不上时，页面顶上会标红。
+- 视频从无损 PNG 重新编码成 H.264（yuv420p），放在 `<out>/media/`，已有的跳过；数字也写在 `report.json`。在 minWM 环境里跑（imageio-ffmpeg、OpenCV），只用 CPU。
+
 ## 读 summary
 
 - 每列 aspect（camera_control、3d_consistency 等）是 WorldScore 归一化后的分数 ×100，越高越好，汇总方式与 WorldScore 相同。content_alignment 只对 pull_out、move、pan 这类"走进新场景"的运动计算。

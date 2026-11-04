@@ -22,6 +22,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools", "eval"
 import _common  # noqa: E402
 import pack  # noqa: E402
 import prepare  # noqa: E402
+import report  # noqa: E402
 import score_disparity  # noqa: E402
 import score_vbench  # noqa: E402
 import summarize  # noqa: E402
@@ -401,3 +402,106 @@ def test_score_disparity_compares_latent_frame_k_with_pixel_frame_4k(tmp_path, m
         result = json.load(f)
     assert result["fit"] == "affine" and result["abs_rel"] == pytest.approx(0.0, abs=1e-6)
     assert [f["pixel_frame"] for f in result["frames"]] == [0, 4, 8]
+
+
+def test_paired_difference_pairs_cases_and_is_reproducible():
+    baseline = [1.0, 2.0, None, 4.0, 5.0]
+    other = [1.5, 2.5, 9.0, None, 5.5]
+    diff = report.paired_difference(baseline, other, resamples=500)
+    assert diff["n"] == 3 and diff["mean"] == pytest.approx(0.5)
+    assert diff["lo"] == pytest.approx(0.5) and diff["hi"] == pytest.approx(0.5)
+    noisy = report.paired_difference([0.0] * 20, list(np.linspace(-1, 3, 20)), resamples=2000)
+    assert noisy["lo"] < noisy["mean"] < noisy["hi"]
+    assert noisy == report.paired_difference([0.0] * 20, list(np.linspace(-1, 3, 20)), 2000)
+    assert report.paired_difference([None], [1.0], resamples=10) is None
+
+
+def test_disparity_video_holds_each_latent_map_for_its_pixel_frames():
+    assert report.latent_frame_per_pixel_frame(9).tolist() == [0, 1, 1, 1, 1, 2, 2, 2, 2]
+
+
+def test_case_groups_follow_summarize():
+    cases = {
+        "a": {"group": "pan_left"},
+        "b": {"group": "push_in"},
+        "c": {"group": "orbit_left"},
+    }
+    groups = report.case_groups(cases)
+    assert list(groups) == [
+        "push_in",
+        "orbit_left",
+        "pan_left",
+        report.PARALLAX_GROUP,
+        report.NO_PARALLAX_GROUP,
+        report.ALL_GROUP,
+    ]
+    assert groups[report.PARALLAX_GROUP] == ["b", "c"] and groups[report.ALL_GROUP] == [
+        "a",
+        "b",
+        "c",
+    ]
+
+
+def _report_instance(runs_root: str, rel: str, move: str, rot_err: float, num_frames: int = 9):
+    from PIL import Image
+
+    instance = os.path.join(runs_root, _common.OUTPUT_DIR, rel)
+    os.makedirs(os.path.join(instance, "frames"))
+    image_data = {
+        "camera_path": [move],
+        "scene_type": "indoor",
+        "category": "Dining spaces",
+        "prompt_list": ["image prompt", "a cozy cafe"],
+    }
+    with open(os.path.join(instance, "image_data.json"), "w") as f:
+        json.dump(image_data, f)
+    for i in range(num_frames):
+        Image.new("RGB", (16, 8), (i, 0, 0)).save(os.path.join(instance, "frames", f"{i:05d}.png"))
+    error = {"camera_control": {"camera_error": {"score": [rot_err, 0.1]}}}
+    with open(os.path.join(instance, "evaluation.json"), "w") as f:
+        json.dump(error, f)
+    return instance
+
+
+def test_report_pairs_runs_on_their_cases_and_links_videos(tmp_path, monkeypatch):
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("cv2")
+    rels = {
+        "push_in": os.path.join("static", "photorealistic", "indoor", "dining_spaces", "000"),
+        "pan_left": os.path.join("static", "photorealistic", "indoor", "dining_spaces", "001"),
+    }
+    base, b2 = str(tmp_path / "base"), str(tmp_path / "b2")
+    for move, rel in rels.items():
+        _report_instance(base, rel, move, rot_err=2.0)
+        instance = _report_instance(b2, rel, move, rot_err=1.5)
+        d = torch.rand(3, 1, 4, 8)
+        torch.save(d, os.path.join(instance, "disparity.pt"))
+        with open(os.path.join(instance, "vbench.json"), "w") as f:
+            json.dump({"imaging_quality": 0.6}, f)
+    written = {}
+
+    def fake_write_mp4(frames, path, fps=_common.FPS):
+        written[os.path.basename(path)] = np.stack(list(frames))
+        open(path, "wb").close()
+
+    monkeypatch.setattr(report, "write_mp4", fake_write_mp4)
+    out = str(tmp_path / "report")
+    argv = ["report.py", "--out", out, "--run", f"base={base}", "--run", f"b2={b2}"]
+    monkeypatch.setattr(sys, "argv", [*argv, "--bootstrap", "200"])
+    report.main()
+
+    push_id = _common.instance_id(rels["push_in"])
+    assert written[f"{push_id}.mp4"].shape == (9, 8, 16, 3)
+    assert written[f"{push_id}.disparity.mp4"].shape == (9, 4, 8, 3)
+    with open(os.path.join(out, "report.json")) as f:
+        result = json.load(f)
+    rot = result["summary"]["push_in"]["rot err (deg)"]
+    assert rot["diff"]["b2"]["mean"] == pytest.approx(-0.5) and rot["diff"]["b2"]["n"] == 1
+    assert result["summary"][report.ALL_GROUP]["rot err (deg)"]["diff"]["b2"]["n"] == 2
+    assert result["summary"][report.ALL_GROUP]["vbench imaging_quality"]["mean"]["base"] == [
+        None,
+        0,
+    ]
+    page = open(os.path.join(out, "index.html"), encoding="utf-8").read()
+    assert f"media/b2/{push_id}.disparity.mp4" in page and "a cozy cafe" in page
+    assert page.count("<section") == 2
