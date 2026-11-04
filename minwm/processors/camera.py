@@ -20,6 +20,10 @@ Trajectory string format (each step = 0.08 unit translation or 3 deg rotation)::
 
 Example: ``"w*19"`` -> 20-frame forward dolly (1 identity + 19 steps).
 Chain segments with commas: ``"w*10,d*9"``, ``"w*9,j*10"``.
+
+Trajectories the string format cannot express (e.g. a 30 deg pan spread over 19
+steps, or an orbit) are given as explicit ``poses``: one w2c 4x4 matrix per latent
+frame, in the same convention, conventionally starting at identity.
 """
 
 import re
@@ -32,14 +36,25 @@ from .base import InferenceInputPreprocessor, InferenceRuntime
 
 
 class CameraTrajectory(InferenceInputPreprocessor):
-    """Attach PRoPE camera tensors when a trajectory string is supplied."""
+    """Attach PRoPE camera tensors from a trajectory string or explicit poses.
 
-    def __init__(self, trajectory_key: str = "trajectory") -> None:
+    Args:
+        trajectory_key (str): batch key of the trajectory string (or a list of
+            strings, one per batch row).
+        poses_key (str): batch key of one sample's explicit ``(T, 4, 4)`` w2c poses,
+            shared by every batch row. Mutually exclusive with the trajectory.
+    """
+
+    def __init__(self, trajectory_key: str = "trajectory", poses_key: str = "poses") -> None:
         self.trajectory_key = trajectory_key
+        self.poses_key = poses_key
 
     def __call__(self, batch: dict, runtime: InferenceRuntime) -> dict:
         trajectory = batch.get(self.trajectory_key)
-        if not trajectory:
+        poses = batch.get(self.poses_key)
+        if trajectory and poses is not None:
+            raise ValueError(f"give either '{self.trajectory_key}' or '{self.poses_key}', not both")
+        if not trajectory and poses is None:
             return batch
 
         if isinstance(trajectory, (list, tuple)):
@@ -51,7 +66,7 @@ class CameraTrajectory(InferenceInputPreprocessor):
             ks = torch.cat([p[1] for p in pairs], dim=0)
         else:
             viewmats, ks = make_camera_tensors(
-                trajectory,
+                trajectory if poses is None else poses,
                 device=runtime.device,
                 dtype=runtime.dtype,
             )
@@ -157,7 +172,7 @@ def parse_trajectory(traj_str: str) -> np.ndarray:
 
 
 def make_camera_tensors(
-    traj_str: str,
+    traj: str | list | np.ndarray,
     fx: float = 0.5,
     fy: float = 0.5,
     cx: float = 0.5,
@@ -172,7 +187,8 @@ def make_camera_tensors(
     without changing call sites.
 
     Args:
-        traj_str (str): trajectory string such as ``"w*19"``.
+        traj (str | list | np.ndarray): a trajectory string such as ``"w*19"``, or
+            explicit ``(T, 4, 4)`` w2c poses (nested lists or an array).
         fx (float): normalized focal length x. Defaults to 0.5.
         fy (float): normalized focal length y. Defaults to 0.5.
         cx (float): normalized principal point x. Defaults to 0.5.
@@ -184,8 +200,16 @@ def make_camera_tensors(
         tuple[Tensor, Tensor]:
             - viewmats (Tensor): ``(1, T, 4, 4)`` w2c matrices.
             - Ks (Tensor): ``(1, T, 3, 3)`` intrinsics.
+
+    Raises:
+        ValueError: if explicit poses are not shaped ``(T, 4, 4)``.
     """
-    viewmats_np = parse_trajectory(traj_str)
+    if isinstance(traj, str):
+        viewmats_np = parse_trajectory(traj)
+    else:
+        viewmats_np = np.asarray(traj, dtype=np.float32)
+        if viewmats_np.ndim != 3 or viewmats_np.shape[1:] != (4, 4):
+            raise ValueError(f"poses must be shaped (T, 4, 4), got {viewmats_np.shape}")
     T = len(viewmats_np)
 
     K = np.array([[fx, 0, cx], [0, fy, cy], [0, 0, 1]], dtype=np.float32)

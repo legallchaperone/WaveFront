@@ -915,6 +915,9 @@ benchmark JSON (`inference.benchmark`, the `$BENCH` above): a JSON array, each e
 - `id` determines the output filename `{id}.mp4`, so it must be unique.
 - `trajectory` follows the same segment semantics as above, and **the sum of segments should be 19**
   (aligned to 20 latent frames; the key overlay in §4.1 converts based on this).
+- Instead of `trajectory`, an item may give `poses`: 20 w2c 4×4 matrices (one per latent frame,
+  OpenCV convention, first = identity) for cameras the string can't express (e.g. a 30° pan, an
+  orbit). `tools/eval/worldscore/` uses this; the key overlay in §4.1 needs `trajectory`.
 - The `image` field is **silently ignored** during Wan21 inference (Wan's preprocessor doesn't use
   it), degrading to pure T2V without error — so the i2v benchmark files from the HY side can be
   reused directly.
