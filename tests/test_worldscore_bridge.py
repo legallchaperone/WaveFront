@@ -82,18 +82,12 @@ def test_push_in_at_default_scale_matches_minwm_forward_string():
     assert np.allclose(poses, parse_trajectory("w*19"), atol=1e-5)
 
 
-def test_worldscore_intrinsics_crop_the_square_camera_to_minwm_frames():
+def test_worldscore_intrinsics_match_droid_slams_calib_on_our_frames():
     fx, fy, cx, cy = _common.worldscore_intrinsics(500.0)
-    # A square source is too tall for 832x480: the crop keeps the full width.
-    assert fx == pytest.approx(500 / 512)
-    assert fy == pytest.approx(832 / 480 * 500 / 512)
-    assert (cx, cy) == (0.5, 0.5)
-
-
-def test_worldscore_intrinsics_crop_the_width_of_a_wider_source():
-    fx, fy, _, _ = _common.worldscore_intrinsics(500.0, source_size=(1280, 480))
-    assert fy == pytest.approx(500 / 480)
     assert fx == pytest.approx(500 / 832)
+    assert fy == pytest.approx(500 / 480)
+    assert fy == pytest.approx(832 / 480 * fx)
+    assert (cx, cy) == (0.5, 0.5)
 
 
 def test_check_motion_catches_a_mirrored_camera():

@@ -48,9 +48,9 @@
    - 不用逐段系数（× 第一个 chunk 的 P₉₀ disparity）：在 group_0001（5000 段）上它没有让各段的平移更集中，运动片段 std(log10) 从 0.292 变成 0.307；各段 P₉₀ 只差 1.8 倍，而平移差 6 倍。评测时 WorldScore 也不提供深度，逐段系数用不上。
    - 评测线的 `translation_scale` 保持 1.52，不改。它把 WorldScore 的轨迹单位换算到基座步长：push_in 走 1 个单位，乘 1.52 正好是 19 步 × 0.08（`tools/eval/worldscore/prepare.py`）。两个系数的目标相同，都是让模型看到约每个 latent 帧 0.08 的步长，但换算的是两种不同的单位，数值接近只是巧合。
    - 这个系数不要叫 c，术语表里的 c 是"进度参数"。
-4. **评测时的内参（2026-11-04 已实现，见下；DROID-SLAM 一条待确认）。** 现在 minWM 推理一律用 fx = fy = 0.5（`minwm/processors/camera.py` 的 `make_camera_tensors` 默认值，没有 config 覆盖），和基座训练用的 fx/W = 0.505、fy/H = 0.898 不一致（fy 差约 2 倍）。WorldScore 的 `config/base_config.yaml` 定 `focal_length: 500`，它的 3D 适配器按 512×512 设主点，按此 fx/W ≈ 0.98、水平视场约 54°，落在 SpatialVID 的第二个峰（0.8–1.0）里；这个分辨率假设还要核实。**规则：模型拿到的 K 永远来自当前数据本身**（2026-11-01 用户确认）。训练用 SpatialVID 每段的真实内参；评测用评测数据的相机，即 WorldScore 的 focal_length 按裁剪到 480×832 后换算，不用占位的 0.5，也不用基座的 0.505。所有方法（含原版 minWM）都用这同一个 K。
-   - 2026-11-04 核实并实现（`tools/eval/worldscore/_common.py` 的 `worldscore_intrinsics`，经 benchmark JSON 的 `intrinsics` 字段进 PRoPE）：512×512 的假设成立，3D 适配器显式建 512×512、主点 (256, 256) 的相机。按 WorldScore 的 `center_crop` 裁到 832×480（保留全宽、裁上下）：[fx/W, fy/H, cx/W, cy/H] = [0.9766, 1.6927, 0.5, 0.5]，像素是方的。
-   - 【待用户确认】DROID-SLAM 的 calib `[500, 500, 256, 256]` 按输入帧本身的像素用，对 832×480 帧等于假设焦距 500 像素（fx/W = 0.601、fy/H = 1.042）。按上面的 K 生成的焦距约 812 像素，纯旋转会被估大约 1.6 倍，旋转误差对所有方法有一个底。改用 DROID 的 K 只需改 `worldscore_intrinsics` 的参考尺寸。
+4. **评测时的内参（2026-11-04 定为 DROID-SLAM 假设的 K，见下）。** 现在 minWM 推理一律用 fx = fy = 0.5（`minwm/processors/camera.py` 的 `make_camera_tensors` 默认值，没有 config 覆盖），和基座训练用的 fx/W = 0.505、fy/H = 0.898 不一致（fy 差约 2 倍）。WorldScore 的 `config/base_config.yaml` 定 `focal_length: 500`，它的 3D 适配器按 512×512 设主点，按此 fx/W ≈ 0.98、水平视场约 54°，落在 SpatialVID 的第二个峰（0.8–1.0）里；这个分辨率假设还要核实。**规则：模型拿到的 K 永远来自当前数据本身**（2026-11-01 用户确认）。训练用 SpatialVID 每段的真实内参；评测用评测数据的相机，即 WorldScore 的 focal_length 按裁剪到 480×832 后换算，不用占位的 0.5，也不用基座的 0.505。所有方法（含原版 minWM）都用这同一个 K。
+   - **用 DROID-SLAM 打分时假设的 K：[fx/W, fy/H, cx/W, cy/H] = [500/832, 500/480, 0.5, 0.5] = [0.601, 1.042, 0.5, 0.5]**（2026-11-04 用户确认），经 benchmark JSON 的 `intrinsics` 字段进 PRoPE（`tools/eval/worldscore/_common.py` 的 `worldscore_intrinsics`）。WorldScore 的相机控制和 3D 一致性都由 DROID-SLAM 估，它的 calib `[500, 500, 256, 256]` 按输入帧本身的像素解释（`camera_error_metrics.py` 的 `image_stream` 随缩放一起换算），对 832×480 的帧就是焦距 500 像素。
+   - 不用按 WorldScore 的 `center_crop` 从 512×512 换算的 K（[0.977, 1.693, 0.5, 0.5]，焦距约 812 像素）：它和打分器的假设差 1.6 倍，DROID 估出的旋转会系统性偏大约 1.6 倍，所有方法的旋转误差都多出几度的底。打分器的主点 (256, 256) 与画面中心不一致，对所有方法相同，不处理。
 5. 转换完用 `tools/data/wan21/check_dataset_bev.py` 把轨迹和视频画在一起检查。
 
 **disparity**（2026-11-01 改为稠密，理由见末尾一节）
@@ -95,7 +95,7 @@
 5. **网络输入输出用线性 d，γ 只用于分层。** 与上面"LMDB 存 γ=1 的 d"一致。
 6. **a = 1/std(2d−1)**，取代 2026-10-31 第 3 条。std 在稠密 disparity 上统计，取到 0.5 的倍数后写进 `model.disparity_scale`。按本节规则在 group_0001 抽 200 段预算：std(2d−1) = 0.645（各段 P10–P90 为 0.55–0.69），1/std = 1.55，**a = 1.5**（2026-11-01 用户确认）；正式 LMDB 写完后在训练子集上复算，变化不到 0.25 就不改。两边每 token 都是 64 个值，按元素比幅度即可，不再按值个数修正。训练时看 disparity 随噪声水平的曲线（提案 7.4 第 3 项）兜底：深度明显晚于颜色就试 2a，太早且层归属错得多就试 a/2。② 和 ③ 用同一个 a。λ=1 不变：两项各按元素取均值，每 token 都是 64 个值。
 
-## 2026-11-04：开发用评测的 disparity 自洽检查【待用户确认】
+## 2026-11-04：开发用评测的 disparity 自洽检查（用户已确认）
 
 1. **参照用 Depth Anything V2 Small（相对深度）**，在 ② 自己生成的 RGB 上估，latent 帧 k 对第 4k 个像素帧，估计结果面积插值到 240×416（`tools/eval/worldscore/score_disparity.py`）。WorldScore 和 minWM 的依赖里都没有单目深度模型；transformers 已在 minWM 环境里。
 2. **每帧拟合尺度和平移，不只拟合尺度。** d 的零点在无穷远，但这个估计器输出的是仿射不变的逆深度（Depth Anything V2 第 5.2 节："affine-invariant inverse depth"，用 MiDaS 的尺度-平移不变 loss），零点任意；只拟合尺度会把估计器的平移算成模型的错。要只拟合尺度，得换成只差尺度的参照（比如 Depth Anything V2 的度量版，要按室内/室外分别选模型），没做。
