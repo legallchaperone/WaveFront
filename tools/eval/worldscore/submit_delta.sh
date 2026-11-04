@@ -77,6 +77,9 @@ source tools/eval/worldscore/delta_env.sh
 export HF_HUB_OFFLINE=1
 # Kernel caches are many small files: node-local /tmp, cleared after the job.
 export TRITON_CACHE_DIR=/tmp/\$USER-triton-\$SLURM_JOB_ID
+# On a 48 GB A40 the VAE decode after generation needs one 7.7 GB block while about
+# 9 GB sit reserved but fragmented; expandable segments let the allocator reuse them.
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 bash tools/eval/worldscore/$script $args
 EOF
 } >"$job"
