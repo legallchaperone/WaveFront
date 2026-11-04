@@ -3,6 +3,7 @@
 #   $WORK/venvs/WaveFront     minWM env (submit_delta.sh activates it in the job); may be
 #                             shared with other checkouts, so it is only installed if missing
 #   $WORK/venvs/worldscore    WorldScore env (install_worldscore.sh)
+#   $WORK/venvs/vbench        VBench env for score_vbench.py (install_vbench.sh)
 #   $WORK/WorldScore          WorldScore checkout + metric checkpoints
 #   $WORK/data/WorldScore-Dataset
 #   $WORK/ckpts               Wan 2.1 base + minWM Stage 1 weights; the repo's ckpts/ links here
@@ -80,6 +81,9 @@ echo "CUDA_HOME=$CUDA_HOME (CUDA $(cuda_release))"
 export CC=gcc CXX=g++
 WS_ROOT=$WORK/WorldScore WS_VENV=$WORK/venvs/worldscore UV=uv \
   bash tools/eval/worldscore/install_worldscore.sh
+
+step "VBench env"
+VB_VENV=$WORK/venvs/vbench UV=uv bash tools/eval/worldscore/install_vbench.sh
 
 step "done"
 cat <<EOF

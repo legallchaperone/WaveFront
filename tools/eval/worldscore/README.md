@@ -120,6 +120,7 @@ NGPU=4 TIME=12:00:00 bash tools/eval/worldscore/submit_delta.sh 2026-11-01-ws-mi
 | `gen/manifest.json` | minWM 推理的完整 config 和每条的 seed |
 | `bench.json` | 最近一次交给 minWM 的条目（只含当时还没生成的） |
 | `eval-shard*.log` | 打分日志，某个样例报错时看这里 |
+| `<样例目录>/vbench.json`、`vbench.log` | VBench 各维度的分数（越高越好）和日志，见下面「VBench 质量维度」 |
 | `subset/`、`worldscore_commit.txt` | 抽到的样例、WorldScore 的 commit |
 | `gen_args.txt` | 第一次生成时的推理 config 和覆盖项 |
 | `slurm-<作业号>.out`、`job-<作业号>.sbatch` | Delta 作业日志和提交的作业脚本（`submit_delta.sh` 写） |
@@ -130,6 +131,27 @@ NGPU=4 TIME=12:00:00 bash tools/eval/worldscore/submit_delta.sh 2026-11-01-ws-mi
 rsync -a --include='*/' --include='output.mp4' --exclude='*' \
   delta:/work/hdd/bjki/wchen38/outputs/WaveFront/<run 名>/worldscore_output/ ./local/ws_videos/
 ```
+
+## VBench 质量维度
+
+`score_vbench.py` 在同一批生成视频（`videos/output.mp4`）上跑 VBench 自己的评测代码（`custom_input` 模式），每个样例的分数写进样例目录的 `vbench.json`。用来报警，不是论文表：哪个维度掉了，就去看那几个视频。
+
+- **维度**：VBench 支持自定义视频的只有 6 个（`subject_consistency`、`background_consistency`、`motion_smoothness`、`dynamic_degree`、`aesthetic_quality`、`imaging_quality`；其余要它自己的 prompt 或辅助信息，代码里直接拒绝）。取其中 4 个质量报警：
+  - `subject_consistency`：每帧和第一帧、上一帧的 DINO 特征相似度，看主体有没有漂。
+  - `background_consistency`：同上，换成 CLIP 特征，看场景有没有漂。
+  - `motion_smoothness`：去掉奇数帧，用 AMT-S 插回来，看插得多准，抓抖动。
+  - `imaging_quality`：逐帧 MUSIQ，抓模糊、噪声、过曝。逐个视频的分数按 VBench 维度分的口径除以 100。
+  - 不要 `aesthetic_quality`：它和 WorldScore 的 `clip_aesthetic` 是同一个 LAION 美学模型；不要 `dynamic_degree`：它量的是动得多不多，不是质量。
+- **相机运动会单独拉低两个 consistency**（pan 本来就会换掉画面内容），所以只在同一批样例上比较各 run，不和 VBench 榜单比。
+- **环境**：单独的 venv（`install_vbench.sh`）。VBench 0.1.5（PyPI，与 GitHub master 在这 4 个维度上代码相同）钉死 `transformers==4.33.2`、`numpy<2`，和 minWM、WorldScore 的环境都冲突；torch 用 2.5.1+cu121。权重（约 1 GB）在安装时下载到 `VBENCH_CACHE_DIR` 和 `TORCH_HOME`，作业不用联网。`setup_delta.sh` 会装到 `$WORK/venvs/vbench`。
+- **运行**：装了 `$WORK/venvs/vbench`（或设了 `VB_PYTHON`）时，`run.sh` 打完 WorldScore 分接着在第一张卡上跑 VBench；也可以单独跑：
+
+```bash
+VBENCH_CACHE_DIR=$WORK/.cache/vbench $WORK/venvs/vbench/bin/python \
+  tools/eval/worldscore/score_vbench.py --runs-root $WORK/outputs/WaveFront/<run 名>
+```
+
+已有全部维度分数的样例会跳过。
 
 ## 读 summary
 

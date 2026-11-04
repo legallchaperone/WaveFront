@@ -14,4 +14,5 @@ export HF_HOME=$WORK/.cache/huggingface
 export TORCH_HOME=$WORK/.cache/torch
 export XDG_CACHE_HOME=$WORK/.cache
 export MPLCONFIGDIR=$WORK/.cache/matplotlib
-mkdir -p "$UV_CACHE_DIR" "$PIP_CACHE_DIR" "$HF_HOME" "$TORCH_HOME" "$MPLCONFIGDIR"
+export VBENCH_CACHE_DIR=$WORK/.cache/vbench
+mkdir -p "$UV_CACHE_DIR" "$PIP_CACHE_DIR" "$HF_HOME" "$TORCH_HOME" "$MPLCONFIGDIR" "$VBENCH_CACHE_DIR"

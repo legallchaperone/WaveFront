@@ -9,6 +9,7 @@ minWM's own trajectory strings.
 import json
 import os
 import sys
+import types
 
 import numpy as np
 import pytest
@@ -21,6 +22,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools", "eval"
 import _common  # noqa: E402
 import pack  # noqa: E402
 import prepare  # noqa: E402
+import score_vbench  # noqa: E402
 import summarize  # noqa: E402
 
 
@@ -255,3 +257,77 @@ def test_pack_refuses_a_frame_count_worldscore_would_reject(tmp_path, monkeypatc
     monkeypatch.setattr(sys, "argv", ["pack.py", "--gen-dir", gen_dir, "--runs-root", runs_root])
     with pytest.raises(SystemExit, match="expects 3"):
         pack.main()
+
+
+def _packed_instance(runs_root: str, rel: str) -> str:
+    instance = os.path.join(runs_root, _common.OUTPUT_DIR, rel)
+    os.makedirs(os.path.join(instance, "videos"))
+    open(os.path.join(instance, "image_data.json"), "w").close()
+    open(os.path.join(instance, "videos", "output.mp4"), "wb").close()
+    return instance
+
+
+class _FakeVBench:
+    """Stands in for ``vbench.VBench``: writes ``*_eval_results.json`` as VBench does."""
+
+    calls = []
+
+    def __init__(self, device, full_info_dir, output_path):
+        self.output_path = output_path
+
+    def evaluate(self, videos_path, name, dimension_list, local, mode):
+        videos = sorted(os.listdir(videos_path))
+        type(self).calls.append((videos, dimension_list, mode))
+        per_video = {
+            "imaging_quality": 62.0,  # VBench keeps per-video MUSIQ on its 0-100 scale
+            "subject_consistency": 0.9,
+        }
+        results = {
+            dim: [
+                0.0,
+                [
+                    {"video_path": os.path.join(videos_path, v), "video_results": per_video[dim]}
+                    for v in videos
+                ],
+            ]
+            for dim in dimension_list
+        }
+        with open(os.path.join(self.output_path, f"{name}_eval_results.json"), "w") as f:
+            json.dump(results, f)
+
+
+def test_score_vbench_writes_per_instance_scores_and_resumes(tmp_path, monkeypatch):
+    runs_root = str(tmp_path / "run")
+    rels = [
+        os.path.join("static", "photorealistic", "indoor", "dining_spaces", "000"),
+        os.path.join("static", "photorealistic", "outdoor", "city", "001"),
+    ]
+    instances = [_packed_instance(runs_root, rel) for rel in rels]
+    # An instance without a video is not generated yet and must be left alone.
+    ungenerated = os.path.join(runs_root, _common.OUTPUT_DIR, "static", "p", "indoor", "c", "002")
+    os.makedirs(ungenerated)
+    open(os.path.join(ungenerated, "image_data.json"), "w").close()
+    fake = types.ModuleType("vbench")
+    fake.__file__ = str(tmp_path / "vbench" / "__init__.py")
+    fake.VBench = _FakeVBench
+    monkeypatch.setitem(sys.modules, "vbench", fake)
+    _FakeVBench.calls.clear()
+    argv = ["score_vbench.py", "--runs-root", runs_root]
+    dims = "--dimensions=imaging_quality,subject_consistency"
+
+    monkeypatch.setattr(sys, "argv", [*argv, "--dimensions=imaging_quality"])
+    score_vbench.main()
+    ((videos, _, mode),) = _FakeVBench.calls
+    assert mode == "custom_input"
+    assert videos == sorted(f"{_common.instance_id(rel)}.mp4" for rel in rels)
+    for instance in instances:
+        with open(os.path.join(instance, "vbench.json")) as f:
+            assert json.load(f) == {"imaging_quality": pytest.approx(0.62)}
+
+    monkeypatch.setattr(sys, "argv", [*argv, dims])
+    score_vbench.main()
+    score_vbench.main()  # everything scored: VBench is not called again
+    assert len(_FakeVBench.calls) == 2
+    with open(os.path.join(instances[0], "vbench.json")) as f:
+        assert json.load(f) == {"imaging_quality": 0.62, "subject_consistency": 0.9}
+    assert not [p for p in os.listdir(runs_root) if p.startswith("vbench-")]
