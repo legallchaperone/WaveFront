@@ -97,9 +97,9 @@
 - **disparity 通道**（代码名 `disp_embed`、`disp_head`）：每个 token 在 RGB latent 旁带 64 个稠密 disparity 值，与颜色联合去噪，共用 σ_i。经 pixel unshuffle 成 16 个通道后，`disp_embed: Conv3d(16→1536, 1×2×2)` 加到 patch embedding 输出上；`disp_head: Linear(1536→64)` 接在输出头的调制特征上。两者都零初始化（4.3）。
 - **pixel unshuffle**（space-to-depth；代码 `disparity_to_channels`，逆为 `disparity_from_channels`，因子 `DISP_UNSHUFFLE`=4、通道数 `DISP_CHANNELS`=16，都在 `minwm/processors/latent.py`）：把每个 latent 格内 4×4 个稠密 disparity 值搬到通道维，得到与 RGB latent 同为 60×104 的 16 个通道；pixel shuffle 是它的逆（4.3）。
 - **d̃**：送进网络的 disparity，d̃ = a·(2d − 1)。分层仍用 [0,1] 的 d。
-- **a（disparity 缩放）**（代码名 `disp_scale`）：决定深度比颜色早多少成形。取 1/std(2d−1)，取到 0.5 的倍数（group_0001 实测 1.55，取 1.5），让 disparity 通道和 RGB latent 每个元素的幅度相当；先看 disparity 随噪声的曲线，再决定要不要用短 run 试 a/2 或 2a；② 和 ③ 用同一个值；不可学习（4.3）。
+- **a（disparity 缩放）**（代码名 `disparity_scale`，即 `model.disparity_scale`）：决定深度比颜色早多少成形。取 1/std(2d−1)，取到 0.5 的倍数（group_0001 实测 1.55，取 1.5），让 disparity 通道和 RGB latent 每个元素的幅度相当；先看 disparity 随噪声的曲线，再决定要不要用短 run 试 a/2 或 2a；② 和 ③ 用同一个值；不可学习（4.3）。
 - **σ_eff**：缩放后深度通道的等效噪声，满足 (1−σ_eff)/σ_eff = a·(1−σ)/σ。例如 a=2、σ=0.5 时 σ_eff≈0.33。
-- **λ**（代码名 `disp_loss_weight`）：disparity 那一项 loss 的权重。先定 a，再调 λ。
+- **λ**（代码名 `disp_weight`，`JointFlowMatchingLoss` 的参数）：disparity 那一项 loss 的权重。先定 a，再调 λ。
 
 ## 8. 训练
 
@@ -125,6 +125,9 @@
 - **层统计**：训练前在数据上统计各 K、各 γ 下每层的 token 占比，相邻 chunk 间层号跳变的比例，以及后续 chunk 截断到 d=1 的 token 比例（6.3）。
 - **窗口内往返测试**：在注意力窗口内（77 个像素帧）走出去再回来的轨迹，用 RememBench 的打分方法比较出发帧和回访帧（7.1）。
 - **出发帧 / 回访帧**：往返轨迹的第 0 帧 / 由估计位姿找出的、回到起点附近的那一帧（7.1）。
+- **开发用评测**：开发阶段每出一个 checkpoint 就跑的小规模评测，用来决定下一步怎么改，不是 7.2 的主表。WorldScore 40 个样例（push_in、pull_out、move_left、orbit_left、pan_left × 室内/室外 × 4），同一批视频再打 VBench 的 4 个画质维度，有 disparity 通道的模型再做 disparity 自洽；结果出一份并排的 HTML 报告，方法之间按样例成对比较（`tools/eval/worldscore/`）。
+- **有视差运动 / 无视差运动**：相机有平移、近处和远处位移不同的运动（push_in、pull_out、move、orbit）/ 只转不移的运动（pan）。本方法的收益应集中在有视差运动上，无视差运动上接近 0，所以评测按这两类分开报（3.2、7.1）。
+- **disparity 自洽**（代码 `score_disparity.py`）：拿模型自己输出的 d，和外部深度估计器（Depth Anything V2 Small）在同一批生成 RGB 上估出的逆深度比。估计器的输出只确定到尺度和平移，所以每帧先拟合尺度和平移，再算 AbsRel 和 δ<1.25。看的是生成的深度和生成的画面对不对得上，不是深度对不对真值。
 - **探针**：冻结 backbone，在中间层特征上训一个 DPT 头预测几何量，看特征里编码了多少几何（7.4）。
 
 ## 10. 项目管理
