@@ -863,6 +863,8 @@ benchmark JSON（`inference.benchmark`，上面的 `$BENCH`）：一个 JSON 数
 - 字符串表达不了的相机（比如 30° 的 pan、orbit）可以不写 `trajectory`，改给 `poses`：20 个
   w2c 4×4 矩阵（每个 latent 帧一个，OpenCV 约定，第一个是单位阵）。`tools/eval/worldscore/`
   用的就是它；§4.1 的叠按键需要 `trajectory`。
+- 可以给 `intrinsics`：归一化的 `[fx/W, fy/H, cx/W, cy/H]`，所有帧共用，格式同训练数据的
+  `intrinsics`（不给时 fx = fy = cx = cy = 0.5）。
 - `image` 字段在 Wan21 推理时被**静默忽略**（Wan 的预处理器不用它），退化为纯 T2V，不报错
   ——所以 HY 那边的 i2v benchmark 文件可以直接复用。
 - 想要固定的评测集就自己维护几档规模（1 条冒烟 / 20 条小批 / 50 条标准 / 200 条大批），

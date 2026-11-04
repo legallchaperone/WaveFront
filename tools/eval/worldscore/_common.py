@@ -23,6 +23,10 @@ NUM_LATENT_FRAMES = 20
 NUM_PIXEL_FRAMES = 4 * (NUM_LATENT_FRAMES - 1) + 1
 RESOLUTION = (832, 480)
 FPS = 16
+# WorldScore's camera: ``focal_length`` pixels on a 512x512 image, principal point
+# centred, as its 3D-scene adapters build it; DROID-SLAM's calib [500, 500, 256, 256]
+# assumes the same square frame.
+WORLDSCORE_IMAGE_SIZE = (512, 512)
 
 _ID_SEP = "--"
 _SAFE_ID = re.compile(r"[A-Za-z0-9._-]+")
@@ -144,6 +148,32 @@ def worldscore_to_minwm_poses(
     c2w = np.linalg.inv(c2w[0]) @ c2w[4 * np.arange(NUM_LATENT_FRAMES)]
     c2w[:, :3, 3] *= translation_scale
     return np.linalg.inv(c2w).astype(np.float32)
+
+
+def worldscore_intrinsics(
+    focal_length: float,
+    source_size: tuple[int, int] = WORLDSCORE_IMAGE_SIZE,
+    target_size: tuple[int, int] = RESOLUTION,
+) -> list[float]:
+    """Normalized intrinsics of WorldScore's camera, centre-cropped to minWM's frame.
+
+    Follows WorldScore's own ``center_crop`` (crop to the target aspect, keep the
+    centre, resize), the convention it applies to every video model's input image.
+    Pixels stay square, so ``fy/H = (W/H) * fx/W``.
+
+    Args:
+        focal_length (float): WorldScore's ``focal_length`` in source pixels.
+        source_size (tuple[int, int]): ``(W, H)`` of the image that focal length is on.
+        target_size (tuple[int, int]): ``(W, H)`` of the generated frames.
+
+    Returns:
+        list[float]: ``[fx/W, fy/H, cx/W, cy/H]``, the format of the training
+        data's ``intrinsics``.
+    """
+    (src_w, src_h), (dst_w, dst_h) = source_size, target_size
+    aspect = dst_w / dst_h
+    crop_w, crop_h = (src_h * aspect, src_h) if src_w / src_h > aspect else (src_w, src_w / aspect)
+    return [focal_length / crop_w, focal_length / crop_h, 0.5, 0.5]
 
 
 def check_motion(layout: str, w2c: np.ndarray, translation_scale: float = 1.0) -> None:

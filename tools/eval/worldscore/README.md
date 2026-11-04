@@ -21,6 +21,7 @@
 
 - **prompt**：原样用 WorldScore 给视频模型的 prompt，例如 `Camera move left. <场景描述>. photorealistic. Everything in the scene remains completely motionless.`
 - **相机**：不靠 prompt 里的文字。WorldScore 为每个样例生成真值轨迹（`camera_data.json`，每个像素帧一个相机），打分时拿它和 DROID-SLAM 从视频里估出的轨迹比。这里把同一条真值轨迹换算成 minWM 的输入：每个 latent 帧一个 w2c 位姿（OpenCV 约定，第一个为单位阵），第 k 个 latent 帧取第 4k 个像素帧的相机，通过 benchmark JSON 的 `poses` 字段交给 PRoPE。
+  - **内参**按 WorldScore 的相机给（`intrinsics` 字段，所有方法相同）：WorldScore 的 `focal_length: 500` 是 512×512 图上的像素焦距、主点居中（它的 3D 适配器这样建相机，DROID-SLAM 的 `[500, 500, 256, 256]` 也是按 512×512 写的）。按 WorldScore 自己的 `center_crop`（裁成目标宽高比、居中、再缩放）换到 832×480：正方形比 832×480 高，裁掉上下、保留全宽，所以 fx/W = 500/512 ≈ 0.977，像素是方的，fy/H = (832/480)·fx/W ≈ 1.693，cx/W = cy/H = 0.5（水平视场约 54°，垂直约 33°）。PRoPE 不用主点。
   - **平移**乘 1.52，使 push_in / pull_out 恰好等于 minWM 的 `w*19` / `s*19`，也就是训练时的步长（每个 latent 帧 0.08）。move 的距离是 push 的一半，orbit 的半径等于 push 的距离，比例与 WorldScore 一致。WorldScore 的平移误差会先拟合尺度再算，所以这个系数不影响打分的公平性，只决定让模型走多远。
   - **旋转**不缩放（旋转误差按角度算）：pan 和 orbit 都转 30°，pan_left 恰好等于 minWM 的 `j*10`。
   - `prepare.py` 会逐个检查换算后的相机是否朝名字所说的方向运动，约定弄反了会直接报错，不会悄悄生成反向的视频。
@@ -139,6 +140,6 @@ rsync -a --include='*/' --include='output.mp4' --exclude='*' \
 
 这些对所有方法一样，影响绝对数值，不影响方法之间的比较：
 
-- WorldScore 的 DROID-SLAM 对所有模型都用固定内参（`[500, 500, 256, 256]`），minWM 生成时的内参是归一化焦距 0.5（水平视场 90°）。
+- WorldScore 的 DROID-SLAM 对所有模型都用固定内参 `[500, 500, 256, 256]`，而且是按输入帧自己的像素算的：对 832×480 的帧，它假设焦距 500 像素、主点在 (256, 256)，不在中心。minWM 按上面的换算生成，焦距约 812 像素，所以 DROID-SLAM 估出的纯旋转会偏大约 1.6 倍（30° 的 pan 估成约 43°），旋转误差对所有方法都有几度的底。平移误差先拟合尺度，受影响较小。
 - WorldScore 的 pan 和 orbit 在 77 个像素帧里转 30°，每个 latent 帧约 1.6°，比 minWM 训练时的 3° 慢。minWM Stage 1 训练时每个 latent 帧只做一种动作，边移边转的 orbit 和完全不动的相机（动态子集）都没见过。
 - prompt 里的 "Camera move left." 这类文字为了与 WorldScore 的协议一致而保留，minWM 的相机实际由 PRoPE 控制。

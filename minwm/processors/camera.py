@@ -43,11 +43,21 @@ class CameraTrajectory(InferenceInputPreprocessor):
             strings, one per batch row).
         poses_key (str): batch key of one sample's explicit ``(T, 4, 4)`` w2c poses,
             shared by every batch row. Mutually exclusive with the trajectory.
+        intrinsics_key (str): batch key of the normalized ``[fx/W, fy/H, cx/W, cy/H]``
+            intrinsics shared by every frame and batch row, the format of the
+            training data's ``intrinsics``. Absent -> :func:`make_camera_tensors`'s
+            defaults.
     """
 
-    def __init__(self, trajectory_key: str = "trajectory", poses_key: str = "poses") -> None:
+    def __init__(
+        self,
+        trajectory_key: str = "trajectory",
+        poses_key: str = "poses",
+        intrinsics_key: str = "intrinsics",
+    ) -> None:
         self.trajectory_key = trajectory_key
         self.poses_key = poses_key
+        self.intrinsics_key = intrinsics_key
 
     def __call__(self, batch: dict, runtime: InferenceRuntime) -> dict:
         trajectory = batch.get(self.trajectory_key)
@@ -57,9 +67,17 @@ class CameraTrajectory(InferenceInputPreprocessor):
         if not trajectory and poses is None:
             return batch
 
+        intrinsics = batch.get(self.intrinsics_key)
+        k_kwargs = {}
+        if intrinsics is not None:
+            if len(intrinsics) != 4:
+                raise ValueError(
+                    f"'{self.intrinsics_key}' must be [fx/W, fy/H, cx/W, cy/H], got {intrinsics}"
+                )
+            k_kwargs = dict(zip(("fx", "fy", "cx", "cy"), map(float, intrinsics)))
         if isinstance(trajectory, (list, tuple)):
             pairs = [
-                make_camera_tensors(item, device=runtime.device, dtype=runtime.dtype)
+                make_camera_tensors(item, **k_kwargs, device=runtime.device, dtype=runtime.dtype)
                 for item in trajectory
             ]
             viewmats = torch.cat([p[0] for p in pairs], dim=0)
@@ -67,6 +85,7 @@ class CameraTrajectory(InferenceInputPreprocessor):
         else:
             viewmats, ks = make_camera_tensors(
                 trajectory if poses is None else poses,
+                **k_kwargs,
                 device=runtime.device,
                 dtype=runtime.dtype,
             )

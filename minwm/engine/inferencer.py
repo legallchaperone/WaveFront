@@ -60,21 +60,22 @@ def read_benchmark(path: str, limit: int | None = None) -> list[dict]:
     default preprocessors ignore ``image``). Every item must carry an ``id`` —
     the output video is named ``{id}.mp4`` (see :meth:`BaseInferencer.run`).
     The camera comes from either a ``trajectory`` string or explicit ``poses``
-    (one w2c 4x4 matrix per latent frame, see :class:`CameraTrajectory`). An
-    item's own ``seed`` pins its noise regardless of its position in the file.
+    (one w2c 4x4 matrix per latent frame, see :class:`CameraTrajectory`), with
+    optional normalized ``intrinsics`` ``[fx/W, fy/H, cx/W, cy/H]``. An item's own
+    ``seed`` pins its noise regardless of its position in the file.
 
     Args:
         path (str): benchmark JSON holding a list of ``{id, caption, trajectory}``
             items, each optionally with ``image`` (present -> i2v, absent ->
-            t2v), ``poses`` (in place of ``trajectory``) and ``seed``. Resolved
-            CWD-independently via :func:`_resolve_benchmark_path`.
+            t2v), ``poses`` (in place of ``trajectory``), ``intrinsics`` and
+            ``seed``. Resolved CWD-independently via :func:`_resolve_benchmark_path`.
         limit (int | None): keep only the first ``limit`` items (for smoke runs);
             ``None`` (default) keeps them all.
 
     Returns:
-        list[dict]: one ``{"id", "prompt", "trajectory"[, "poses"][, "seed"][, "image"]}``
-        dict per item, with any ``image`` resolved relative to the JSON file's
-        directory.
+        list[dict]: one ``{"id", "prompt", "trajectory"[, "poses"][, "intrinsics"][, "seed"]
+        [, "image"]}`` dict per item, with any ``image`` resolved relative to the JSON
+        file's directory.
 
     Raises:
         ValueError: if any item is missing ``id``.
@@ -94,7 +95,7 @@ def read_benchmark(path: str, limit: int | None = None) -> list[dict]:
             "prompt": item["caption"],
             "trajectory": item.get("trajectory"),
         }
-        for key in ("poses", "seed"):
+        for key in ("poses", "intrinsics", "seed"):
             if key in item:
                 sample[key] = item[key]
         image = item.get("image")
@@ -310,8 +311,8 @@ class BaseInferencer:
         Args:
             samples (list[dict] | None): per-sample dicts, each with a required
                 ``id`` (names the output ``{id}.mp4``) and a ``prompt``, plus
-                optional ``image`` (present -> i2v), ``trajectory`` / ``poses``
-                and ``seed``. When
+                optional ``image`` (present -> i2v), ``trajectory`` / ``poses``,
+                ``intrinsics`` and ``seed``. When
                 ``None`` (default) they are loaded from ``inference.benchmark``
                 via :meth:`build_benchmark`.
         """

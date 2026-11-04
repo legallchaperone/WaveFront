@@ -66,15 +66,17 @@ def test_read_benchmark_keeps_absolute_image(tmp_path):
     assert sample["image"] == abs_img
 
 
-def test_read_benchmark_passes_poses_and_seed_through(tmp_path):
+def test_read_benchmark_passes_poses_intrinsics_and_seed_through(tmp_path):
     poses = [[[1.0, 0, 0, 0], [0, 1.0, 0, 0], [0, 0, 1.0, 0], [0, 0, 0, 1.0]]] * 2
-    item = {"id": "ws_01", "caption": "a room", "poses": poses, "seed": 7}
+    intrinsics = [0.98, 1.69, 0.5, 0.5]
+    item = {"id": "ws_01", "caption": "a room", "poses": poses, "intrinsics": intrinsics, "seed": 7}
     (sample,) = read_benchmark(_write_json(tmp_path, [item]))
     assert sample == {
         "id": "ws_01",
         "prompt": "a room",
         "trajectory": None,
         "poses": poses,
+        "intrinsics": intrinsics,
         "seed": 7,
     }
 

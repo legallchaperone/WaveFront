@@ -220,6 +220,21 @@ class TestCameraTrajectoryPoses:
         with pytest.raises(ValueError, match="not both"):
             CameraTrajectory()(batch, self._RUNTIME)
 
+    def test_intrinsics_set_k_for_poses_and_trajectory_lists(self):
+        expected = torch.tensor([[0.98, 0, 0.5], [0, 1.69, 0.5], [0, 0, 1]])
+        intrinsics = [0.98, 1.69, 0.5, 0.5]
+        poses = parse_trajectory("j*3").tolist()
+        for camera in ({"poses": poses}, {"trajectory": ["w*3", "j*3"]}):
+            batch = {"prompts": ["a", "b"], "intrinsics": intrinsics, **camera}
+            batch = CameraTrajectory()(batch, self._RUNTIME)
+            assert batch["Ks"].shape == (2, 4, 3, 3)
+            assert torch.allclose(batch["Ks"], expected.expand(2, 4, 3, 3))
+
+    def test_malformed_intrinsics_raise(self):
+        batch = {"prompts": ["a"], "trajectory": "w*1", "intrinsics": [0.5, 0.5]}
+        with pytest.raises(ValueError, match="fx/W"):
+            CameraTrajectory()(batch, self._RUNTIME)
+
     def test_no_camera_leaves_batch_untouched(self):
         batch = CameraTrajectory()({"prompts": ["a"]}, self._RUNTIME)
         assert "viewmats" not in batch

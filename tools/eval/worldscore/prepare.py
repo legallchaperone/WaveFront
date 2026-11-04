@@ -13,7 +13,8 @@ Instance directories are written by WorldScore's own dataloader and adapter
 (``camera_data.json``, ``image_data.json``, ``input_image.png``), so prompts and
 ground-truth cameras are exactly what its evaluator expects. Each benchmark item
 carries WorldScore's prompt, the ground-truth camera converted to minWM poses,
-and a seed fixed by the instance id. Instances whose frames are already in place
+WorldScore's intrinsics normalized to minWM's frame, and a seed fixed by the
+instance id. Instances whose frames are already in place
 are skipped, so the benchmark lists only what is left to generate. WorldScore's
 code is imported from ``--worldscore-root`` and none of its metrics are, so any
 environment with torch, torchvision, scipy and omegaconf runs this, e.g. minWM's::
@@ -41,6 +42,7 @@ from _common import (
     instance_seed,
     register_model,
     worldscore_config,
+    worldscore_intrinsics,
     worldscore_to_minwm_poses,
 )
 
@@ -133,7 +135,8 @@ def materialize(cfg: dict, translation_scale: float) -> list[dict]:
         translation_scale (float): see :func:`worldscore_to_minwm_poses`.
 
     Returns:
-        list[dict]: ``{id, caption, poses, seed}`` items for minWM's benchmark JSON.
+        list[dict]: ``{id, caption, poses, intrinsics, seed}`` items for minWM's
+        benchmark JSON.
     """
     from worldscore.benchmark.helpers.dataloaders import dataloader_videogen
     from worldscore.benchmark.helpers.helper import Helper
@@ -141,6 +144,7 @@ def materialize(cfg: dict, translation_scale: float) -> list[dict]:
     loader = dataloader_videogen(cfg)
     helper = Helper(cfg)
     out_root = os.path.join(cfg["runs_root"], OUTPUT_DIR)
+    intrinsics = [round(v, 6) for v in worldscore_intrinsics(cfg["focal_length"])]
     items = []
     for data in loader.data:
         (prompt,) = helper.adapt(data)
@@ -159,6 +163,7 @@ def materialize(cfg: dict, translation_scale: float) -> list[dict]:
                 "id": sample_id,
                 "caption": prompt,
                 "poses": poses.round(6).tolist(),
+                "intrinsics": intrinsics,
                 "seed": instance_seed(sample_id),
             }
         )

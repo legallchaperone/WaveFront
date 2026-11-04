@@ -918,6 +918,8 @@ benchmark JSON (`inference.benchmark`, the `$BENCH` above): a JSON array, each e
 - Instead of `trajectory`, an item may give `poses`: 20 w2c 4×4 matrices (one per latent frame,
   OpenCV convention, first = identity) for cameras the string can't express (e.g. a 30° pan, an
   orbit). `tools/eval/worldscore/` uses this; the key overlay in §4.1 needs `trajectory`.
+- An item may give `intrinsics`: normalized `[fx/W, fy/H, cx/W, cy/H]` for every frame, the
+  format of the training data's `intrinsics` (default fx = fy = cx = cy = 0.5).
 - The `image` field is **silently ignored** during Wan21 inference (Wan's preprocessor doesn't use
   it), degrading to pure T2V without error — so the i2v benchmark files from the HY side can be
   reused directly.
