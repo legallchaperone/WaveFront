@@ -54,6 +54,8 @@ hf=$WORK/venvs/WaveFront/bin/hf
   "diffusion_pytorch_model.safetensors" "config.json" >/dev/null
 "$hf" download MIN-Lab/minWM --local-dir ckpts --include "Wan21/Action2V/ar_diffusion_tf/*" >/dev/null
 ln -sfnT ar_diffusion_tf ckpts/Wan21/Action2V/stage1_ar_tf
+# score_disparity.py's estimator, into the HF cache jobs read offline.
+"$hf" download depth-anything/Depth-Anything-V2-Small-hf >/dev/null
 du -shL ckpts/Wan2.1-T2V-1.3B ckpts/Wan21/Action2V/stage1_ar_tf
 
 step "WorldScore dataset (1.2 GB)"

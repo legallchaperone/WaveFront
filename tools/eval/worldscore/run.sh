@@ -1,8 +1,9 @@
 #!/bin/bash
 # Evaluate one minWM-family checkpoint on the WorldScore subset, end to end:
 # pack leftovers -> prepare -> generate (minWM, one process per GPU) -> pack
-# -> score (WorldScore, one process per GPU) -> summarize. Every stage skips
-# finished work, so rerunning with the same OUT_DIR resumes.
+# -> score (WorldScore, one process per GPU; then VBench and, for disparity models,
+# disparity consistency) -> summarize. Every stage skips finished work, so rerunning
+# with the same OUT_DIR resumes.
 #
 # Usage (from the repo root, in the minWM environment):
 #   bash tools/eval/worldscore/run.sh <minWM infer config> [dotlist overrides...]
@@ -25,7 +26,7 @@ set -eo pipefail
 stage=${WS_STAGE:-all}
 case $stage in all | gen | score) ;; *) echo "WS_STAGE must be all, gen or score" >&2; exit 2 ;; esac
 if [ "$stage" != score ]; then
-  [ $# -ge 1 ] || { sed -n '2,22p' "$0"; exit 2; }
+  [ $# -ge 1 ] || { sed -n '2,23p' "$0"; exit 2; }
   cfg=$1
   shift
 fi
@@ -93,6 +94,9 @@ if [ -n "${VB_PYTHON:-}" ]; then
   CUDA_VISIBLE_DEVICES=${gpus[0]} "$VB_PYTHON" "$here/score_vbench.py" --runs-root "$out" 2>&1 |
     tee "$out/vbench.log" || status=1
 fi
+# A no-op unless the model wrote disparity (baseline 2 and later).
+CUDA_VISIBLE_DEVICES=${gpus[0]} python "$here/score_disparity.py" --runs-root "$out" 2>&1 |
+  tee "$out/disparity.log" || status=1
 
 python "$here/summarize.py" --runs-root "$out"
 exit "$status"

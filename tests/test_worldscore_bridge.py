@@ -22,6 +22,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "tools", "eval"
 import _common  # noqa: E402
 import pack  # noqa: E402
 import prepare  # noqa: E402
+import score_disparity  # noqa: E402
 import score_vbench  # noqa: E402
 import summarize  # noqa: E402
 
@@ -331,3 +332,72 @@ def test_score_vbench_writes_per_instance_scores_and_resumes(tmp_path, monkeypat
     with open(os.path.join(instances[0], "vbench.json")) as f:
         assert json.load(f) == {"imaging_quality": 0.62, "subject_consistency": 0.9}
     assert not [p for p in os.listdir(runs_root) if p.startswith("vbench-")]
+
+
+def _disparity(seed: int = 0, shape=(48, 64)) -> np.ndarray:
+    return np.random.default_rng(seed).uniform(0.05, 0.95, shape)
+
+
+def test_affine_fit_recovers_an_affine_invariant_estimate():
+    d = _disparity()
+    estimate = (d - 0.3) / 2.0  # an estimator's inverse depth with its own scale and shift
+    m = score_disparity.frame_metrics(d, estimate, "affine")
+    assert m["scale"] == pytest.approx(2.0) and m["shift"] == pytest.approx(0.3)
+    assert m["abs_rel"] == pytest.approx(0.0, abs=1e-9) and m["delta1"] == 1.0
+    # A scale-only fit charges the estimator's shift to the model.
+    assert score_disparity.frame_metrics(d, estimate, "scale")["abs_rel"] > 0.1
+
+
+def test_scale_fit_is_exact_for_an_up_to_scale_estimate():
+    d = _disparity()
+    m = score_disparity.frame_metrics(d, d / 3.0, "scale")
+    assert m["scale"] == pytest.approx(3.0) and m["shift"] == 0.0
+    assert m["abs_rel"] == pytest.approx(0.0, abs=1e-9)
+
+
+def test_saturated_and_far_pixels_are_left_out():
+    d = _disparity()
+    d[:16] = 1.0  # clipped: the true disparity is unknown
+    d[16:24] = 0.01  # beyond the floor
+    m = score_disparity.frame_metrics(d, d.copy(), "affine")
+    assert m["valid_fraction"] == pytest.approx(24 / 48)
+    assert m["abs_rel"] == pytest.approx(0.0, abs=1e-9)
+
+
+def test_too_few_pixels_give_no_score():
+    d = np.full((8, 8), 1.0)
+    m = score_disparity.frame_metrics(d, d, "affine")
+    assert m["abs_rel"] is None and m["delta1"] is None and m["valid_fraction"] == 0.0
+
+
+def test_score_disparity_compares_latent_frame_k_with_pixel_frame_4k(tmp_path, monkeypatch):
+    torch = pytest.importorskip("torch")
+    runs_root = str(tmp_path / "run")
+    with_d = _packed_instance(runs_root, os.path.join("static", "p", "indoor", "c", "000"))
+    without_d = _packed_instance(runs_root, os.path.join("static", "p", "indoor", "c", "001"))
+    d = np.stack([_disparity(seed=k) for k in range(3)]).astype(np.float32)
+    torch.save(torch.from_numpy(d[:, None]), os.path.join(with_d, "disparity.pt"))
+    for instance in (with_d, without_d):
+        os.makedirs(os.path.join(instance, "frames"))
+        for i in range(9):  # 4 * (3 - 1) + 1 pixel frames
+            open(os.path.join(instance, "frames", f"{i:05d}.png"), "wb").close()
+    seen = []
+
+    def fake_estimator(device):
+        def estimate(paths, size):
+            seen.append([os.path.basename(p) for p in paths])
+            assert tuple(size) == d.shape[1:]
+            return (d - 0.2) * 5.0
+
+        return estimate
+
+    monkeypatch.setattr(score_disparity, "DepthAnything", fake_estimator)
+    monkeypatch.setattr(sys, "argv", ["score_disparity.py", "--runs-root", runs_root])
+    score_disparity.main()
+    score_disparity.main()  # already scored with this fit: skipped
+    assert seen == [["00000.png", "00004.png", "00008.png"]]
+    assert not os.path.exists(os.path.join(without_d, score_disparity.RESULT_FILE))
+    with open(os.path.join(with_d, score_disparity.RESULT_FILE)) as f:
+        result = json.load(f)
+    assert result["fit"] == "affine" and result["abs_rel"] == pytest.approx(0.0, abs=1e-6)
+    assert [f["pixel_frame"] for f in result["frames"]] == [0, 4, 8]

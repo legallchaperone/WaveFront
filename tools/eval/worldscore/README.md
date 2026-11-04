@@ -121,6 +121,7 @@ NGPU=4 TIME=12:00:00 bash tools/eval/worldscore/submit_delta.sh 2026-11-01-ws-mi
 | `bench.json` | 最近一次交给 minWM 的条目（只含当时还没生成的） |
 | `eval-shard*.log` | 打分日志，某个样例报错时看这里 |
 | `<样例目录>/vbench.json`、`vbench.log` | VBench 各维度的分数（越高越好）和日志，见下面「VBench 质量维度」 |
+| `<样例目录>/disparity_consistency.json`、`disparity.log` | ② 起才有：模型自己的 d 和单目估计的一致性，见下面「disparity 自洽」 |
 | `subset/`、`worldscore_commit.txt` | 抽到的样例、WorldScore 的 commit |
 | `gen_args.txt` | 第一次生成时的推理 config 和覆盖项 |
 | `slurm-<作业号>.out`、`job-<作业号>.sbatch` | Delta 作业日志和提交的作业脚本（`submit_delta.sh` 写） |
@@ -152,6 +153,15 @@ VBENCH_CACHE_DIR=$WORK/.cache/vbench $WORK/venvs/vbench/bin/python \
 ```
 
 已有全部维度分数的样例会跳过。
+
+## disparity 自洽（② 起）
+
+`score_disparity.py` 检查模型输出的 d 和它自己生成的 RGB 对不对得上：在生成帧上跑 Depth Anything V2 Small（`depth-anything/Depth-Anything-V2-Small-hf`，minWM 环境里的 transformers 就能跑），逐帧和 `disparity.pt` 比。没有 `disparity.pt` 的 run（原版 minWM、①）直接跳过。`run.sh` 打分阶段会自动跑；单独跑是 `python tools/eval/worldscore/score_disparity.py --runs-root <run 目录>`。
+
+- **对齐帧**：d 每个 latent 帧一张；第 k 张和第 4k 个像素帧比（与位姿的取法相同），估计结果用面积插值缩到 d 的 240×416。
+- **拟合**：Depth Anything V2 输出的是仿射不变的逆深度（训练用 MiDaS 的尺度-平移不变 loss），零点是任意的。所以每帧按最小二乘拟合 r = s·D + t（默认 `--fit affine`）。我们的 d 本身零点在无穷远，只拟合尺度（`--fit scale`）要求参照也是零点在无穷远、只差尺度的估计（比如度量深度模型）；对这个估计器只拟合尺度，会把估计器自己的平移算成模型的错。
+- **像素**：d 在 1 截断，d ≥ 0.999 的不算；d 或 r 低于 0.02 的不算（天空和远景：d = 0.9·(1/z)/P₉₀，即深度超过第一个 chunk P₉₀ 处深度的 45 倍，深度比值在这里发散）。`valid_fraction` 记每帧留下的比例。
+- **指标**：以 r 为参照，AbsRel 按深度算（mean |1/d − 1/r| / (1/r)），δ<1.25 是 max(d/r, r/d) < 1.25 的比例（在深度和 disparity 上相同）。逐帧记在 `frames` 里，`abs_rel`、`delta1` 是各帧的平均。看逐帧曲线能分出"一开始就不对"和"越往后越漂"。
 
 ## 读 summary
 
