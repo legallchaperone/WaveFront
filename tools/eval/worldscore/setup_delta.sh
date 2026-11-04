@@ -16,7 +16,7 @@
 # 16 cores and 37 GB (62 GB hard, no swap); compiles here use 8 jobs. Compute nodes'
 # internet access is undocumented, so everything a job needs is fetched here:
 #   export WORK=/work/hdd/<project>/$USER
-#   nohup bash tools/eval/worldscore/setup_delta.sh > $WORK/setup_worldscore.log 2>&1 &
+#   mkdir -p $WORK/logs; nohup bash tools/eval/worldscore/setup_delta.sh > $WORK/logs/setup_worldscore.log 2>&1 &
 # Rerunning skips finished steps. Needs no GPU.
 set -eo pipefail
 

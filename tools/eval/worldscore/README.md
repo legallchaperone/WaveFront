@@ -44,7 +44,8 @@
 export WORK=/work/hdd/<项目>/$USER          # 也写进 ~/.bashrc
 git clone -b feature/benchmark https://github.com/legallchaperone/WaveFront.git $WORK/WaveFront-benchmark
 cd $WORK/WaveFront-benchmark
-nohup bash tools/eval/worldscore/setup_delta.sh > $WORK/setup_worldscore.log 2>&1 &
+mkdir -p $WORK/logs
+nohup bash tools/eval/worldscore/setup_delta.sh > $WORK/logs/setup_worldscore.log 2>&1 &
 ```
 
 - **为什么在登录节点**：NCSA 的说明把装软件和传文件放在登录节点；计算节点能不能上网，文档里没有确切说法。
