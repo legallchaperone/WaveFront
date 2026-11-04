@@ -288,6 +288,12 @@ def test_baseline2_inference_config_matches_its_training_model_and_stage1_infere
         "type": "LatentNoise",
         "latent_channels": latent_channels,
     }
+    from minwm.engine.inferencer import build_input_preprocessors
+    from minwm.processors import CameraTrajectory, LatentNoise
+
+    noise, camera = build_input_preprocessors(b2["inference"])
+    assert isinstance(noise, LatentNoise) and noise.latent_channels == latent_channels
+    assert isinstance(camera, CameraTrajectory)
     own = ("checkpoint", "output_dir", "latent_shape", "input_preprocessors")
     assert {k: v for k, v in b2["inference"].items() if k not in own} == {
         k: v for k, v in stage1["inference"].items() if k not in own
