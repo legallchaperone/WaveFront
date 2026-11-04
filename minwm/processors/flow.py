@@ -50,6 +50,10 @@ class FlowNoise(BatchPreprocessor):
         mode_scale (float): mode-weighting scale (``weighting_scheme="mode"``).
         apply_weight (bool): if True write the per-timestep loss weight; if False
             write ``weight=None`` for an unweighted (masked) mean.
+        latent_channels (int, optional): when ``clean_latent`` carries extra channels
+            after the first ``latent_channels`` (e.g. disparity), draw the noise of the
+            latent channels first and the extra channels after, so the latent noise
+            equals what a latent-only run draws from the same generator.
         scheduler (FlowMatchingScheduler, optional): the recipe's shared scheduler,
             injected in :meth:`~minwm.engine.recipe_base.Recipe.build_preprocessors`.
     """
@@ -64,6 +68,7 @@ class FlowNoise(BatchPreprocessor):
         logit_std: float = 1.0,
         mode_scale: float = 0.0,
         apply_weight: bool = True,
+        latent_channels: int | None = None,
         scheduler: FlowMatchingScheduler | None = None,
     ) -> None:
         if num_frame_per_block < 1:
@@ -78,6 +83,7 @@ class FlowNoise(BatchPreprocessor):
         self.logit_std = logit_std
         self.mode_scale = mode_scale
         self.apply_weight = apply_weight
+        self.latent_channels = latent_channels
         self.scheduler = scheduler
 
     def __call__(self, batch: dict, device: torch.device) -> dict:
@@ -87,9 +93,7 @@ class FlowNoise(BatchPreprocessor):
         B, F = clean.shape[:2]
         timestep = batch.get("timestep")
         with get_rng_states_tracker().fork():
-            noise = torch.randn(
-                clean.shape, dtype=clean.dtype, generator=batch.get("noise_generator")
-            ).to(device)
+            noise = self._draw_noise(clean, batch.get("noise_generator")).to(device)
             if timestep is None:
                 timestep = self._sample_timesteps(B, F, device)
         noisy = self.scheduler.add_noise(
@@ -109,6 +113,18 @@ class FlowNoise(BatchPreprocessor):
         batch["target"] = self.scheduler.training_target(clean, noise)
         batch["weight"] = weight
         return batch
+
+    def _draw_noise(self, clean: torch.Tensor, generator: torch.Generator | None) -> torch.Tensor:
+        channels = clean.shape[2]
+        if self.latent_channels is None or channels <= self.latent_channels:
+            return torch.randn(clean.shape, dtype=clean.dtype, generator=generator)
+        parts = [
+            torch.randn(
+                (*clean.shape[:2], c, *clean.shape[3:]), dtype=clean.dtype, generator=generator
+            )
+            for c in (self.latent_channels, channels - self.latent_channels)
+        ]
+        return torch.cat(parts, dim=2)
 
     def _sample_timesteps(self, B: int, F: int, device: torch.device) -> torch.Tensor:
         timestep = self.scheduler.sample_timesteps(

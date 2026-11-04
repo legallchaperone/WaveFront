@@ -66,3 +66,21 @@ def test_flow_noise_groups_timesteps_after_independent_prefix():
     )(batch, torch.device("cpu"))
 
     assert output["timestep"].tolist() == [[0, 1, 1, 1, 1, 5, 5, 5, 5]]
+
+
+def test_flow_noise_draws_latent_channels_first():
+    latent = torch.randn(1, 4, 16, 2, 3)
+    joint = torch.cat([latent, torch.randn(1, 4, 16, 2, 3)], dim=2)
+    plain = FlowNoise(uniform_across_frames=False, scheduler=_TimestepScheduler())
+    split = FlowNoise(False, latent_channels=16, scheduler=_TimestepScheduler())
+
+    def noise(proc, clean):
+        batch = {"clean_latent": clean, "noise_generator": torch.Generator().manual_seed(7)}
+        return proc(batch, torch.device("cpu"))["noise"]
+
+    ref = noise(plain, latent)
+    out = noise(split, joint)
+    assert out.shape == joint.shape
+    torch.testing.assert_close(out[:, :, :16], ref)
+    assert not torch.equal(noise(plain, joint)[:, :, :16], ref)
+    torch.testing.assert_close(noise(split, latent), ref)

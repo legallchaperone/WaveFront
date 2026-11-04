@@ -45,7 +45,13 @@ recipe = dict(
     batch_preprocessors=[
         dict(type="LatentToDevice"),
         dict(type="DisparityChannel"),
-        dict(type="FlowNoise", uniform_across_frames=False, num_frame_per_block=4),
+        # Latent noise drawn first, so val noise on the RGB channels equals baseline 1's.
+        dict(
+            type="FlowNoise",
+            uniform_across_frames=False,
+            num_frame_per_block=4,
+            latent_channels=16,
+        ),
         dict(type="CleanContextNoiseAug", max_timestep=0),
     ],
 )
