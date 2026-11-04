@@ -91,6 +91,9 @@ bash tools/eval/worldscore/submit_delta.sh 2026-11-01-ws-minwm-s1
 
 换模型就在 run 名后面写 `run_small.sh`、推理 config 和覆盖项，例如 `... 2026-11-02-ws-x run_small.sh configs/wan21/action2v/infer/stage1_ar_tf.py inference.checkpoint=<路径>`。
 
+- **①**：仍用 `configs/wan21/action2v/infer/stage1_ar_tf.py`，只换 `inference.checkpoint=<导出的 model.pt>`。
+- **②**：用 `configs/wan21/wavefront/infer/b2_joint_depth.py`（模型多一个 disparity 通道，噪声 32 个通道；RGB 的 16 个通道先抽，同一个 seed 下和原版 minWM、① 的 RGB 噪声相同），例如 `... 2026-11-05-ws-b2 run_small.sh configs/wan21/wavefront/infer/b2_joint_depth.py inference.checkpoint=<导出的 model.pt>`。训练 checkpoint 先用 `tools/export_checkpoint.py` 导出成单个 `.pt`。生成的 disparity 由 `pack.py` 放到样例目录的 `disparity.pt`。
+
 **扩到完整子集**（121 个），用同一个 run 名改用 `run.sh`，已有的 40 个直接沿用：
 
 ```bash
@@ -112,7 +115,7 @@ NGPU=4 TIME=12:00:00 bash tools/eval/worldscore/submit_delta.sh 2026-11-01-ws-mi
 | 路径 | 内容 |
 |---|---|
 | `summary.md` / `summary.json` | 按相机运动类型汇总的表 |
-| `worldscore_output/static/<风格>/<室内外>/<类别>/<名字>/` | 一个静态样例：`videos/output.mp4`（看视频）、`frames/`、`camera_data.json`（真值相机）、`evaluation.json`（各指标） |
+| `worldscore_output/static/<风格>/<室内外>/<类别>/<名字>/` | 一个静态样例：`videos/output.mp4`（看视频）、`frames/`、`camera_data.json`（真值相机）、`evaluation.json`（各指标）；② 还有 `disparity.pt`（`[F, 1, 240, 416]` 的 d，F 是 latent 帧数） |
 | `worldscore_output/dynamic/<风格>/<运动类型>/<名字>/` | 一个动态样例，同上，没有 `camera_data.json` |
 | `gen/manifest.json` | minWM 推理的完整 config 和每条的 seed |
 | `bench.json` | 最近一次交给 minWM 的条目（只含当时还没生成的） |

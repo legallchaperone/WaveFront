@@ -270,6 +270,30 @@ def test_baseline_configs_load_and_share_their_setup():
         assert "data_path" not in node and "_delete_" not in node
 
 
+def test_baseline2_inference_config_matches_its_training_model_and_stage1_inference():
+    from minwm.processors import DISP_CHANNELS
+
+    stage1 = load("configs/wan21/action2v/infer/stage1_ar_tf.py")
+    b1_train = load("configs/wan21/wavefront/train/b1_continue.py")
+    b2_train = load("configs/wan21/wavefront/train/b2_joint_depth.py")
+    b2 = load("configs/wan21/wavefront/infer/b2_joint_depth.py")
+
+    MWMConfig.from_dict(b2)
+    added = {k: v for k, v in b2_train["model"].items() if k not in b1_train["model"]}
+    assert added == {"use_disparity": True, "disparity_scale": 1.5}
+    assert b2["model"] == {**stage1["model"], **added}
+    latent_channels, *spatial = stage1["inference"]["latent_shape"]
+    assert list(b2["inference"]["latent_shape"]) == [latent_channels + DISP_CHANNELS, *spatial]
+    assert b2["inference"]["input_preprocessors"][0] == {
+        "type": "LatentNoise",
+        "latent_channels": latent_channels,
+    }
+    own = ("checkpoint", "output_dir", "latent_shape", "input_preprocessors")
+    assert {k: v for k, v in b2["inference"].items() if k not in own} == {
+        k: v for k, v in stage1["inference"].items() if k not in own
+    }
+
+
 def test_load_yaml(tmp_path):
     p = tmp_path / "cfg.yaml"
     p.write_text("model:\n  type: fractions:Fraction\n  numerator: 7\n")

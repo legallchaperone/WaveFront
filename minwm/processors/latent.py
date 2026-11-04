@@ -9,10 +9,20 @@ from .base import BatchPreprocessor, InferenceInputPreprocessor, InferenceRuntim
 
 
 class LatentNoise(InferenceInputPreprocessor):
-    """Create or place the ``noise`` tensor used as the generation seed."""
+    """Create or place the ``noise`` tensor used as the generation seed.
 
-    def __init__(self, key: str = "noise") -> None:
+    Args:
+        key (str): batch key of the noise tensor.
+        latent_channels (int | None): when ``latent_shape`` carries extra channels
+            after the first ``latent_channels`` (e.g. disparity), draw the latent
+            channels' noise first and the extra channels' after, so the latent noise
+            equals what a latent-only model draws from the same seed (the inference
+            counterpart of ``FlowNoise(latent_channels=...)``).
+    """
+
+    def __init__(self, key: str = "noise", latent_channels: int | None = None) -> None:
         self.key = key
+        self.latent_channels = latent_channels
 
     def _latent_shape(self, inference_cfg: dict) -> tuple[int, int, int, int]:
         channels, height, width = inference_cfg["latent_shape"]
@@ -30,10 +40,20 @@ class LatentNoise(InferenceInputPreprocessor):
 
         prompts = batch["prompts"]
         num_frames, channels, height, width = self._latent_shape(runtime.inference_cfg)
-        batch[self.key] = torch.randn(
-            [len(prompts), num_frames, channels, height, width],
-            device=runtime.device,
-            dtype=runtime.dtype,
+        if self.latent_channels is None or channels <= self.latent_channels:
+            splits = [channels]
+        else:
+            splits = [self.latent_channels, channels - self.latent_channels]
+        batch[self.key] = torch.cat(
+            [
+                torch.randn(
+                    [len(prompts), num_frames, c, height, width],
+                    device=runtime.device,
+                    dtype=runtime.dtype,
+                )
+                for c in splits
+            ],
+            dim=2,
         )
         return batch
 

@@ -2,7 +2,8 @@
 
 For each ``{id}.frames/`` that ``tools/infer_mwm.py`` wrote (``inference.save_frames=True``),
 moves the frames to ``<instance>/frames/`` and the mp4 to ``<instance>/videos/output.mp4``,
-the layout WorldScore's evaluator reads. Safe to rerun: outputs already moved are gone
+the layout WorldScore's evaluator reads, and a disparity model's ``{id}.disparity.pt`` to
+``<instance>/disparity.pt``. Safe to rerun: outputs already moved are gone
 from the generation directory, so it also picks up what a preempted job left behind::
 
     python tools/eval/worldscore/pack.py --gen-dir $OUT_DIR/gen --runs-root $OUT_DIR
@@ -44,6 +45,9 @@ def main() -> None:
         if os.path.exists(video):
             os.makedirs(os.path.join(instance, "videos"), exist_ok=True)
             os.replace(video, os.path.join(instance, "videos", "output.mp4"))
+        disparity = os.path.join(args.gen_dir, f"{sample_id}.disparity.pt")
+        if os.path.exists(disparity):
+            os.replace(disparity, os.path.join(instance, "disparity.pt"))
         packed += 1
     print(f"packed {packed} instance(s) from {args.gen_dir}", flush=True)
 

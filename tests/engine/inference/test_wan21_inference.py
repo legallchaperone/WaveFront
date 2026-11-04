@@ -205,6 +205,27 @@ class TestTrajectoryParser:
             make_camera_tensors(np.zeros((20, 3, 4)))
 
 
+class TestLatentNoise:
+    _CFG = {"num_frames": 2, "latent_shape": (3, 4, 5)}
+
+    def _noise(self, latent_channels: int | None, channels: int) -> torch.Tensor:
+        cfg = {**self._CFG, "latent_shape": (channels, 4, 5)}
+        runtime = InferenceRuntime(
+            device=torch.device("cpu"), dtype=torch.float32, inference_cfg=cfg
+        )
+        torch.manual_seed(0)
+        return LatentNoise(latent_channels=latent_channels)({"prompts": ["a"]}, runtime)["noise"]
+
+    def test_extra_channels_leave_the_latent_noise_unchanged(self):
+        latent_only = self._noise(None, 3)
+        with_extra = self._noise(3, 5)
+        assert with_extra.shape == (1, 2, 5, 4, 5)
+        assert torch.equal(with_extra[:, :, :3], latent_only)
+
+    def test_split_is_a_no_op_without_extra_channels(self):
+        assert torch.equal(self._noise(3, 3), self._noise(None, 3))
+
+
 class TestCameraTrajectoryPoses:
     _RUNTIME = InferenceRuntime(device=torch.device("cpu"), dtype=torch.float32, inference_cfg={})
 

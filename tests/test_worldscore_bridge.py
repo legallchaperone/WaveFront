@@ -232,10 +232,11 @@ def _fake_run(tmp_path, num_frames: int) -> tuple[str, str, str]:
     for i in range(num_frames):
         open(os.path.join(gen_dir, f"{sample_id}.frames", f"{i:05d}.png"), "wb").close()
     open(os.path.join(gen_dir, f"{sample_id}.mp4"), "wb").close()
+    open(os.path.join(gen_dir, f"{sample_id}.disparity.pt"), "wb").close()
     return runs_root, gen_dir, instance
 
 
-def test_pack_moves_frames_and_video_into_the_instance(tmp_path, monkeypatch):
+def test_pack_moves_frames_video_and_disparity_into_the_instance(tmp_path, monkeypatch):
     runs_root, gen_dir, instance = _fake_run(tmp_path, num_frames=3)
     monkeypatch.setattr(sys, "argv", ["pack.py", "--gen-dir", gen_dir, "--runs-root", runs_root])
     pack.main()
@@ -245,6 +246,7 @@ def test_pack_moves_frames_and_video_into_the_instance(tmp_path, monkeypatch):
         "00002.png",
     ]
     assert os.path.exists(os.path.join(instance, "videos", "output.mp4"))
+    assert os.path.exists(os.path.join(instance, "disparity.pt"))
     assert os.listdir(gen_dir) == []
 
 
