@@ -35,8 +35,8 @@ Usage (from the repo root, as a module so ``tools.data.wan21`` resolves)::
 import argparse
 import os
 import time
-from collections import Counter
-from collections.abc import Iterable, Mapping
+from collections import Counter, deque
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from functools import partial
 from typing import Any
 
@@ -54,6 +54,8 @@ MAX_INVERTED_FRACTION = 0.05
 # Poses are re-derived through scipy on another machine; a different window moves them by far more.
 POSE_ATOL = 1e-4
 PER_SAMPLE_BYTES = int(np.prod(DISPARITY_SHAPE)) * 2 + 1000
+# One commit per clip syncs 4 MB at a time and makes the writer the bottleneck on Lustre.
+CLIPS_PER_COMMIT = 64
 
 
 def depth_zip_path(row: Mapping, depths_root: str) -> str:
@@ -235,35 +237,52 @@ def write_disparity_lmdb(results: Iterable[Mapping], env: Any, tally: DisparityT
         RuntimeError: from :meth:`DisparityTally.add_skip`.
     """
     total = len(tally.groups)
-    for n, result in enumerate(results, 1):
-        clip_id = result["clip_ids"]
-        head = f"{n}/{total} {clip_id}"
-        if result["status"] == "skip":
-            print(f"{head} SKIP {result['message']} {result['seconds']:.2f}s", flush=True)
-            tally.add_skip(clip_id, result["reason"])
-            continue
-        if result["status"] == "error":
-            print(f"{head} failed: {result['message']}", flush=True)
-            tally.failed.append(clip_id)
-            continue
-        d, stats = result["disparity"], result["stats"]
-        if d.shape != DISPARITY_SHAPE or d.dtype != np.float16:
-            print(f"{head} failed: disparity is {d.dtype}{d.shape}", flush=True)
-            tally.failed.append(clip_id)
-            continue
-        with env.begin(write=True) as txn:
+    txn = env.begin(write=True)
+    try:
+        for n, result in enumerate(results, 1):
+            clip_id = result["clip_ids"]
+            head = f"{n}/{total} {clip_id}"
+            if result["status"] == "skip":
+                print(f"{head} SKIP {result['message']} {result['seconds']:.2f}s", flush=True)
+                tally.add_skip(clip_id, result["reason"])
+                continue
+            if result["status"] == "error":
+                print(f"{head} failed: {result['message']}", flush=True)
+                tally.failed.append(clip_id)
+                continue
+            d, stats = result["disparity"], result["stats"]
+            if d.shape != DISPARITY_SHAPE or d.dtype != np.float16:
+                print(f"{head} failed: disparity is {d.dtype}{d.shape}", flush=True)
+                tally.failed.append(clip_id)
+                continue
             txn.put(f"disparity_{tally.written}_data".encode(), np.ascontiguousarray(d).tobytes())
             txn.put(f"clip_ids_{tally.written}_data".encode(), clip_id.encode())
-        tally.add_label(d, stats.clipped_fraction)
-        print(
-            f"{head} p90={stats.p90:.4f} clipped={stats.clipped_fraction:.4f} "
-            f"near_below={stats.near_below_fraction:.2f} {result['seconds']:.2f}s",
-            flush=True,
-        )
-    with env.begin(write=True) as txn:
+            tally.add_label(d, stats.clipped_fraction)
+            if tally.written % CLIPS_PER_COMMIT == 0:
+                txn.commit()
+                txn = env.begin(write=True)
+            print(
+                f"{head} p90={stats.p90:.4f} clipped={stats.clipped_fraction:.4f} "
+                f"near_below={stats.near_below_fraction:.2f} {result['seconds']:.2f}s",
+                flush=True,
+            )
         shape = " ".join(map(str, (tally.written, *DISPARITY_SHAPE)))
         txn.put(b"disparity_shape", shape.encode())
         txn.put(b"clip_ids_shape", str(tally.written).encode())
+        txn.commit()
+    except BaseException:
+        txn.abort()
+        raise
+
+
+def _bounded_imap(pool: Any, func: Callable, items: Iterable, depth: int) -> Iterator:
+    pending = deque()
+    for item in items:
+        pending.append(pool.apply_async(func, (item,)))
+        if len(pending) >= depth:
+            yield pending.popleft().get()
+    while pending:
+        yield pending.popleft().get()
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -313,8 +332,11 @@ def main(argv: list[str] | None = None) -> None:
         if args.num_workers > 0:
             from multiprocessing import Pool
 
+            # Pool.imap queues every finished label until the writer takes it: 4 MB a clip, so a
+            # writer slower than the workers fills memory. Keep at most 4 clips per worker queued.
             with Pool(args.num_workers) as pool:
-                write_disparity_lmdb(pool.imap(worker, jobs), env, tally)
+                results = _bounded_imap(pool, worker, jobs, 4 * args.num_workers)
+                write_disparity_lmdb(results, env, tally)
         else:
             write_disparity_lmdb(map(worker, jobs), env, tally)
     finally:
