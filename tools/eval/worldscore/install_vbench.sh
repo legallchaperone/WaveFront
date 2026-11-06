@@ -6,7 +6,8 @@
 # in WorldScore's env (VBench's own setup asks for CUDA 11.x or 12.1). No GPU or
 # compiler needed; the weights (DINO ViT-B/16, CLIP ViT-B/32, AMT-S, MUSIQ-SPAQ, about
 # 1 GB) go to VBENCH_CACHE_DIR and TORCH_HOME, so jobs need no internet. Rerunning
-# skips what is done.
+# skips what is done. setuptools stays below 81: OpenAI CLIP (background consistency)
+# imports pkg_resources, which newer setuptools (84.2.1 got pulled in) no longer ship.
 #
 # Usage:
 #   VB_VENV=<venv dir> VBENCH_CACHE_DIR=<cache dir> bash tools/eval/worldscore/install_vbench.sh
@@ -30,9 +31,9 @@ step "venv and packages"
 printf 'torch==2.5.1\ntorchvision==0.20.1\nnumpy<2\n' >"$VB_VENV/constraints.txt"
 "$UV" pip install -q --python "$P" -c "$VB_VENV/constraints.txt" \
   --index-url https://download.pytorch.org/whl/cu121 --extra-index-url https://pypi.org/simple \
-  --index-strategy unsafe-best-match torch torchvision vbench==0.1.5
+  --index-strategy unsafe-best-match torch torchvision vbench==0.1.5 "setuptools<81"
 
 step "weights"
 "$P" "$here/score_vbench.py" --prefetch
-"$P" -c "import torch, vbench; print('VBench env ok; GPU visible:', torch.cuda.is_available())"
+"$P" -c "import torch, vbench, clip; print('VBench env ok; GPU visible:', torch.cuda.is_available())"
 step "done: VB_PYTHON=$P"
