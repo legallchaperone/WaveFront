@@ -2,7 +2,7 @@
 
 接手的 agent 先读这份，再读 `decisions.md`。这里只记"现在做到哪、下一步是什么"；已定的模型与实验决定在 `decisions.md`。每次状态变化后更新本文件并提交。
 
-最后更新：2026-11-07 12:48 CST
+最后更新：2026-11-07 16:05 CST
 
 ## 角色与规矩
 
@@ -32,9 +32,11 @@
 | 数据：val disparity | 完成（8/8） |
 | 数据：train disparity | 完成（2026-11-05）：写入 12,017，跳过 111（全部 inverted_depth），失败 0；std(2d−1)=0.6445，a 仍为 1.5 |
 | ① `b1-continue` | 训完（3000 步，val/loss_rgb 0.2009 → 0.1880，W&B `cwxlab/wavefront/0ockapbw`）。`model_{1000,2000,3000}.safetensors` 已上传 HF；DCP 只留 `checkpoint_3000`。导出文件在 `$W/outputs/WaveFront/b1-continue/ckpts/exported/` |
-| ② `b2-joint-depth`，DeltaAI 任务 3529078 | **排队中**（2026-11-04 13:58 提交，时间上限已改为 11 h）。优先级 1131 = fairshare 122 + 排队时长 1000（已满）+ 分区 10 |
+| ② `b2-joint-depth`，DeltaAI 任务 3529078 | **排队中**（2026-11-04 13:58 提交，时间上限已改为 11 h）。2026-11-07 16:00 优先级 1756 = fairshare 746 + 排队时长 1000（已满），前面 457/2,328 个；Slurm 估计 11-08 16:38 开跑 |
 | 开发用评测：原版 minWM，8 样例（试跑），K 选项 B | 完成。输出 `$W/outputs/WaveFront/2026-11-04-ws-minwm-k601/`。WorldScore-Static 68.19；VBench 四维均值 subject 0.978、background 0.956、motion 0.994、imaging 0.760（每条在各自 `vbench.json`，`summary.md` 不含 VBench） |
-| DeltaAI 额度 | 用户已在 ACCESS 换到 1000 小时（2026-11-07），集群上**尚未同步**：`accounts` 仍显示存入 200、余 158，Slurm 份额仍为 200 |
+| DeltaAI 额度 | 已同步（2026-11-07 16:00 查）：`accounts` 存入 1042、余 1000；RawShares 1042，账户 LevelFS 回到 0.53 |
+| 开发用评测：① 40 样例，K 选项 B | **已提交**，Delta 任务 23648178（gpuA40x4，1 卡，10 h），输出 `$W/outputs/WaveFront/2026-11-07-ws-b1-k601/`，`inference.checkpoint` 指向 ① 的 `model_3000.safetensors`。预计约 7 h |
+| 开发用评测：原版 minWM 扩到 40 样例 | **已提交**，Delta 任务 23648597（同一 run `2026-11-04-ws-minwm-k601`，接着已有的 8 个生成剩下 32 个；已核对 8 个都在 `run_small.sh` 的 40 个里）。预计约 6 h |
 
 ## ② 排队慢的原因
 
@@ -42,7 +44,7 @@ DeltaAI 用 Fair Tree。我们账户份额只占全机 0.0021%，① 用了约 4
 
 ## 下一步
 
-1. **额度同步**：查 `accounts` 存入额是否变 1000、`sshare -A bjki-dtai-gh` 的 RawShares 是否随之变化。一两天不变就建议用户给 NCSA help 发邮件。
+1. **两个评测跑完后**：用 `report.py` 出 ① 对原版 minWM 的配对 HTML 报告给用户看（用户 2026-11-07 已要求）；② 训完评测后再加进来。
 2. **② 开跑后**：查 step 0 的 `val/loss_rgb` 是否等于 ① 的 0.2009（同噪声），再看 250/500 步的 disp_err、每步时间、显存。日志在 `$W/outputs/WaveFront/b2-joint-depth/slurm-<id>.out`。注意 ② 用 `$W/WaveFront-data`（`1d3513a`），比提交时的 `ac6ce4b` 多了评测脚本和 disparity 构建修复，训练代码没变。
 3. **② 训完**：按 checkpoint 流程导出、上传、核对、清理（删除前要用户批准）。
 4. **开发用评测（每个任务要批准）**：原版 minWM 的同一 run 扩到 40 样例；① 用 K 选项 B 跑 40 样例（`inference.checkpoint` 指向 `model_3000.safetensors`）；之后 ②。三者齐了跑 `report.py` 出配对 HTML 报告给用户看。
@@ -50,7 +52,6 @@ DeltaAI 用 Fair Tree。我们账户份额只占全机 0.0021%，① 用了约 4
 ## 等用户决定
 
 - 评测任务把 venv 换到 nvme（改 `submit_delta.sh`）：最近两次评测光启动就花了近一小时。要先给用户看 diff。
-- 原版 minWM 扩到 40 样例、① 的 40 样例评测：等批准后提交。
 - DeltaAI 上整篇论文要用多少 SU（③ 和放大实验）：还没估。
 
 ## 以后再做
