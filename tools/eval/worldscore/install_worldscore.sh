@@ -3,8 +3,11 @@
 #
 # Follows WorldScore's README ("Evaluation -> Environment Setup" and "Download
 # Evaluation Checkpoints") in a separate Python 3.10 venv (it needs torch 2.5.1 +
-# cu121; minWM uses 2.9.1), plus the SEA-RAFT checkpoint its list omits. No GPU
-# needed: CUDA extensions are compiled for TORCH_CUDA_ARCH_LIST. Every step skips
+# cu121; minWM uses 2.9.1), plus the SEA-RAFT checkpoint its list omits. On aarch64
+# (DeltaAI's GH200), whose first PyTorch CUDA wheels are 2.6.0+cu126, it uses those and
+# builds torch-scatter from source; scores from the two stacks are not interchangeable
+# until checked against each other. No GPU needed: CUDA extensions are compiled for
+# TORCH_CUDA_ARCH_LIST. Every step skips
 # what is already done, so rerunning after a failure resumes. Used by setup_delta.sh
 # and colab.ipynb.
 #
@@ -17,7 +20,7 @@
 #   WS_COMMIT             WorldScore commit (default: the one the bridge was written against)
 #   CUDA_HOME             CUDA 12 toolkit (default: from the nvcc on PATH)
 #   TORCH_CUDA_ARCH_LIST  GPU archs to compile for (default: this node's GPU, else "8.0;8.6",
-#                         i.e. A100 and A40/A10)
+#                         i.e. A100 and A40/A10, or "9.0" (GH200) on aarch64)
 #   MAX_JOBS              parallel compile jobs (default 8)
 #   UV                    uv binary (default: uv on PATH)
 set -eo pipefail
@@ -41,7 +44,11 @@ if [ -z "${TORCH_CUDA_ARCH_LIST:-}" ]; then
   # On a GPU-less node nvidia-smi may exist and print an error to stdout; keep only "X.Y".
   TORCH_CUDA_ARCH_LIST=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null |
     grep -E '^[0-9]+\.[0-9]+$' | head -1 || true)
-  TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST:-8.0;8.6}
+  if [ "$(uname -m)" = aarch64 ]; then
+    TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST:-9.0}
+  else
+    TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST:-8.0;8.6}
+  fi
 fi
 arch_re='^[0-9]+\.[0-9]+(\+PTX)?([; ][0-9]+\.[0-9]+(\+PTX)?)*$'
 [[ $TORCH_CUDA_ARCH_LIST =~ $arch_re ]] || die "TORCH_CUDA_ARCH_LIST='$TORCH_CUDA_ARCH_LIST' is not a list like '8.0;8.6'"
@@ -67,11 +74,25 @@ step "venv and packages"
 # transformers>=5, which dropped GreedySearchDecoderOnlyOutput that mamba_ssm 2.2.4 imports,
 # breaking the metrics package (it imports every metric). Pin pyiqa to the release current
 # when WorldScore came out (0.1.13, Oct 2024; WorldScore Apr 2025): it pins transformers 4.37.2.
-printf 'torch==2.5.1\ntorchvision==0.20.1\ntorchaudio==2.5.1\nnumpy<2\nsetuptools<70\npyiqa==0.1.13\ntransformers<5\n' >"$C"
-cu121=https://download.pytorch.org/whl/cu121
-pip_install torch torchvision torchaudio --index-url $cu121
-pip_install xformers==0.0.28.post3 --index-url $cu121
-pip_install torch-scatter -f https://data.pyg.org/whl/torch-2.5.1+cu121.html
+if [ "$(uname -m)" = aarch64 ]; then
+  torch=2.6.0 vision=0.21.0 cu=cu126
+else
+  torch=2.5.1 vision=0.20.1 cu=cu121
+fi
+printf 'torch==%s\ntorchvision==%s\ntorchaudio==%s\nnumpy<2\nsetuptools<70\npyiqa==0.1.13\ntransformers<5\n' \
+  $torch $vision $torch >"$C"
+index=https://download.pytorch.org/whl/$cu
+pip_install torch torchvision torchaudio --index-url $index
+if [ "$(uname -m)" = aarch64 ]; then
+  # Neither has an aarch64 wheel. Nothing in WorldScore imports xformers; DROID-SLAM
+  # needs torch-scatter, built here against the installed torch. Without a visible GPU
+  # its setup.py builds the CPU op only unless FORCE_CUDA is set.
+  pip_install setuptools wheel ninja
+  FORCE_CUDA=1 pip_install --no-build-isolation torch-scatter
+else
+  pip_install xformers==0.0.28.post3 --index-url $index
+  pip_install torch-scatter -f https://data.pyg.org/whl/torch-$torch+$cu.html
+fi
 pip_install pip setuptools wheel packaging ninja open3d tensorboard scipy opencv-python tqdm \
   matplotlib pyyaml evo gdown yacs loguru einops timm imageio spacy catalogue pyiqa torchmetrics \
   pytorch_lightning cvxpy huggingface_hub safetensors
