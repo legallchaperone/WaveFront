@@ -132,7 +132,7 @@ EOF
 fi
 
 step "Grounded-SAM, SAM2, VFIMamba"
-if ! "$P" -c "import torch, segment_anything, groundingdino._C, sam2, causal_conv1d, mamba_ssm" 2>/dev/null; then
+if ! "$P" -c "import torch, segment_anything, groundingdino._C, sam2, causal_conv1d_cuda, selective_scan_cuda, mamba_ssm" 2>/dev/null; then
   cd "$WS_ROOT/thirdparty/Grounded-Segment-Anything"
   pip_install -e segment_anything
   patch_type_dispatch GroundingDINO/groundingdino/models/GroundingDINO/csrc/MsDeformAttn/*.cu
@@ -140,7 +140,22 @@ if ! "$P" -c "import torch, segment_anything, groundingdino._C, sam2, causal_con
   pip_install --no-build-isolation --reinstall-package groundingdino -e GroundingDINO
   cd "$WS_ROOT/thirdparty/sam2"
   pip_install --no-build-isolation -e .
-  pip_install --no-build-isolation causal_conv1d==1.5.0.post8 mamba_ssm==2.2.4
+  if [ "$(uname -m)" = aarch64 ]; then
+    # Both setup.py files fetch a prebuilt wheel tagged linux_x86_64 whatever the host, and
+    # the causal-conv1d sdist lacks csrc/, so build from the tagged GitHub source. torch
+    # 2.6's aarch64 wheel pulls no triton, and 3.5 is triton's first aarch64 wheel on PyPI.
+    pip_install triton==3.5.1
+    src=$WS_VENV/src
+    mkdir -p "$src"
+    [ -d "$src/causal-conv1d" ] || git clone -q --depth 1 --branch v1.5.0.post8 \
+      https://github.com/Dao-AILab/causal-conv1d.git "$src/causal-conv1d"
+    [ -d "$src/mamba" ] || git clone -q --depth 1 --branch v2.2.4 \
+      https://github.com/state-spaces/mamba.git "$src/mamba"
+    CAUSAL_CONV1D_FORCE_BUILD=TRUE MAMBA_FORCE_BUILD=TRUE pip_install --no-build-isolation \
+      --no-deps --reinstall "$src/causal-conv1d" "$src/mamba"
+  else
+    pip_install --no-build-isolation causal_conv1d==1.5.0.post8 mamba_ssm==2.2.4
+  fi
 fi
 
 step "WorldScore"
