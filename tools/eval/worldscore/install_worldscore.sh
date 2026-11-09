@@ -116,6 +116,10 @@ open("setup.py", "w").write(src)
 EOF
   grep -o "compute_[0-9]*" setup.py | sort -u | tr '\n' ' '
   echo
+  # torch 2.6 dropped the Tensor.type() overload of the AT_DISPATCH macros; pass
+  # scalar_type(), which every torch 2.x accepts. Idempotent: the result no longer matches.
+  sed -i -E 's/\b([A-Za-z0-9_]+)\.type\(\), "/\1.scalar_type(), "/g' \
+    src/*.cu thirdparty/lietorch/lietorch/src/*.cpp thirdparty/lietorch/lietorch/src/*.cu
   "$P" setup.py install >"$WS_VENV/droid_build.log" 2>&1 || { tail -40 "$WS_VENV/droid_build.log"; die "DROID-SLAM build failed"; }
 fi
 
