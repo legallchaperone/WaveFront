@@ -2,7 +2,7 @@
 
 接手的 agent 先读这份，再读 `decisions.md`。这里只记"现在做到哪、下一步是什么"；已定的模型与实验决定在 `decisions.md`。每次状态变化后更新本文件并提交。
 
-最后更新：2026-11-08 21:10 CST
+最后更新：2026-11-08 21:45 CST
 
 ## 角色与规矩
 
@@ -32,12 +32,19 @@
 | 数据：val disparity | 完成（8/8） |
 | 数据：train disparity | 完成（2026-11-05）：写入 12,017，跳过 111（全部 inverted_depth），失败 0；std(2d−1)=0.6445，a 仍为 1.5 |
 | ① `b1-continue` | 训完（3000 步，val/loss_rgb 0.2009 → 0.1880，W&B `cwxlab/wavefront/0ockapbw`）。`model_{1000,2000,3000}.safetensors` 已上传 HF；DCP 只留 `checkpoint_3000`。导出文件在 `$W/outputs/WaveFront/b1-continue/ckpts/exported/` |
-| ② `b2-joint-depth`，DeltaAI 任务 3529078 | **训完**（11-08 10:51–19:28，8 h 37 min，约 34.5 SU，exit 0）。val/loss_rgb 0.2009 → 0.2322（250 步）→ 0.2015（3000 步），① 同步数为 0.1880；分噪声水平 @0.1/0.5/0.9 为 0.513/0.119/0.084（① 0.482/0.110/0.079）。val/disp_err 0.1919 → 0.1328。三个都已导出到 `ckpts/exported/`；HF 只传上 `model_{1000,2000}`（大小已核对），`model_3000` 上传失败：HF 报 cwx-umich 私有存储已满（日志 `$W/logs/b2_export_upload.log`），等用户决定。DCP 1000/2000/3000 都保留，HF 补齐前不删 |
+| ② `b2-joint-depth`，DeltaAI 任务 3529078 | **训完**（11-08 10:51–19:28，8 h 37 min，约 34.5 SU，exit 0）。val/loss_rgb 0.2009 → 0.2322（250 步）→ 0.2015（3000 步），① 同步数为 0.1880；分噪声水平 @0.1/0.5/0.9 为 0.513/0.119/0.084（① 0.482/0.110/0.079）。val/disp_err 0.1919 → 0.1328。三个都已导出到 `ckpts/exported/`。HF 有 `model_{1000,2000}`（大小已核对）；HF 私有存储已满，`model_3000` 存在用户 Google Drive `gdrive:wavefront-checkpoints/b2-joint-depth/`（rclone，md5 已核对，见 memory `gdrive-rclone`）。DCP 只留 `checkpoint_3000`（1000/2000 经用户批准于 11-08 删除） |
 | 开发用评测：原版 minWM，8 样例（试跑），K 选项 B | 完成。输出 `$W/outputs/WaveFront/2026-11-04-ws-minwm-k601/`。WorldScore-Static 68.19；VBench 四维均值 subject 0.978、background 0.956、motion 0.994、imaging 0.760（每条在各自 `vbench.json`，`summary.md` 不含 VBench） |
 | DeltaAI 额度 | 已同步（2026-11-07 16:00 查）：`accounts` 存入 1042、余 1000；RawShares 1042，账户 LevelFS 回到 0.53 |
 | 开发用评测：① 40 样例，K 选项 B | **完成**（Delta 任务 23648178，11-08 03:59 开始，10:49 出 summary，40/40 打分无失败）。输出 `$W/outputs/WaveFront/2026-11-07-ws-b1-k601/` |
 | 开发用评测：② 40 样例 | **排队中**，Delta 任务 23673998（gpuA40x4，1 卡，10 h），输出 `$W/outputs/WaveFront/2026-11-08-ws-b2-k601/`，checkpoint 为 ② 的 `model_3000.safetensors` |
 | 开发用评测：原版 minWM 扩到 40 样例 | **排队中**（11-08 12:50 仍无 slurm 输出），Delta 任务 23648597（同一 run `2026-11-04-ws-minwm-k601`，接着已有的 8 个生成剩下 32 个；已核对 8 个都在 `run_small.sh` 的 40 个里）。预计约 6 h |
+
+## DeltaAI 评测环境（搭建中）
+
+- 用户 2026-11-08 选 (a)：DeltaAI 上搭 WorldScore 环境，搭好后用它给 ① 已生成的 40 个视频重新打分（`WS_STAGE=score`），逐例对比 A40 结果，量出两套环境的差异，再决定能否混用。
+- aarch64 上最早的 PyTorch CUDA 轮子是 2.6.0+cu126，所以环境与 Delta 的 2.5.1+cu121 不同；`install_worldscore.sh` 已改（`9376e93`、`90dacde`：torch 2.6、不装 xformers、源码编 torch-scatter、DROID-SLAM 的 `.type()` 补丁）。
+- 布局：评测代码 `$W/WaveFront-eval-gh`（`WaveFront-eval` 的 git worktree，detached 在 origin/feature/model），WorldScore `$W/WorldScore-gh`（指标权重软链到 `$W/WorldScore` 的），venv `/work/nvme/bjki/wchen38/venvs/worldscore-gh`。脚本 `$W/logs/setup_worldscore_gh.sh`，日志同名 .log。
+- VBench 还没做：它依赖的 decord 在 aarch64 上没有轮子也没有 sdist，要从源码编（需 FFmpeg 开发库，DeltaAI 上有没有未查）。
 
 ## ② 排队慢的原因
 
