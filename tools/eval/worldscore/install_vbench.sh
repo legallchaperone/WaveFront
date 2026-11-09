@@ -15,6 +15,9 @@
 # Environment:
 #   VB_VENV           venv to create; scoring then uses $VB_VENV/bin/python
 #   VBENCH_CACHE_DIR  VBench's weight cache (VBench's default is ~/.cache/vbench)
+#   VB_TORCH, VB_TORCHVISION, VB_CUDA
+#                     torch stack instead of 2.5.1 / 0.20.1 / cu121, e.g. 2.7.0 / 0.22.0 /
+#                     cu128 for Blackwell GPUs
 #   UV                uv binary (default: uv on PATH)
 set -eo pipefail
 
@@ -28,9 +31,10 @@ command -v wget >/dev/null || { echo "install_vbench.sh: VBench downloads with w
 P=$VB_VENV/bin/python
 step "venv and packages"
 [ -x "$P" ] || "$UV" venv -q --python 3.10 "$VB_VENV"
-printf 'torch==2.5.1\ntorchvision==0.20.1\nnumpy<2\n' >"$VB_VENV/constraints.txt"
+printf 'torch==%s\ntorchvision==%s\nnumpy<2\n' "${VB_TORCH:-2.5.1}" "${VB_TORCHVISION:-0.20.1}" \
+  >"$VB_VENV/constraints.txt"
 "$UV" pip install -q --python "$P" -c "$VB_VENV/constraints.txt" \
-  --index-url https://download.pytorch.org/whl/cu121 --extra-index-url https://pypi.org/simple \
+  --index-url "https://download.pytorch.org/whl/${VB_CUDA:-cu121}" --extra-index-url https://pypi.org/simple \
   --index-strategy unsafe-best-match torch torchvision vbench==0.1.5 "setuptools<81"
 
 step "weights"

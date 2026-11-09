@@ -21,6 +21,10 @@
 #   CUDA_HOME             CUDA 12 toolkit (default: from the nvcc on PATH)
 #   TORCH_CUDA_ARCH_LIST  GPU archs to compile for (default: this node's GPU, else "8.0;8.6",
 #                         i.e. A100 and A40/A10, or "9.0" (GH200) on aarch64)
+#   WS_TORCH, WS_TORCHVISION, WS_CUDA
+#                         torch stack to install instead of the arch default (2.5.1 / 0.20.1 /
+#                         cu121 on x86, 2.6.0 / 0.21.0 / cu126 on aarch64), e.g. 2.7.0 /
+#                         0.22.0 / cu128 for Blackwell GPUs, which 2.5.1 has no kernels for
 #   MAX_JOBS              parallel compile jobs (default 8)
 #   UV                    uv binary (default: uv on PATH)
 set -eo pipefail
@@ -61,6 +65,10 @@ step "CUDA $(nvcc --version | sed -n 's/.*release \([0-9.]*\),.*/\1/p') at $CUDA
 P=$WS_VENV/bin/python
 C=$WS_VENV/constraints.txt
 pip_install() { "$UV" pip install -q --python "$P" -c "$C" "$@"; }
+# torch 2.6 dropped the Tensor.type() overload of the AT_DISPATCH macros, which DROID-SLAM,
+# lietorch and GroundingDINO still pass; scalar_type() works with every torch 2.x.
+# Idempotent: the result no longer matches.
+patch_type_dispatch() { sed -i -E 's/\b([A-Za-z0-9_]+)\.type\(\), "/\1.scalar_type(), "/g' "$@"; }
 
 step "WorldScore checkout"
 [ -d "$WS_ROOT/.git" ] || git clone -q https://github.com/haoyi-duan/WorldScore.git "$WS_ROOT"
@@ -79,6 +87,7 @@ if [ "$(uname -m)" = aarch64 ]; then
 else
   torch=2.5.1 vision=0.20.1 cu=cu121
 fi
+torch=${WS_TORCH:-$torch} vision=${WS_TORCHVISION:-$vision} cu=${WS_CUDA:-$cu}
 printf 'torch==%s\ntorchvision==%s\ntorchaudio==%s\nnumpy<2\nsetuptools<70\npyiqa==0.1.13\ntransformers<5\n' \
   $torch $vision $torch >"$C"
 index=https://download.pytorch.org/whl/$cu
@@ -90,7 +99,8 @@ if [ "$(uname -m)" = aarch64 ]; then
   pip_install setuptools wheel ninja
   FORCE_CUDA=1 pip_install --no-build-isolation torch-scatter
 else
-  pip_install xformers==0.0.28.post3 --index-url $index
+  # WorldScore's README pins xformers for torch 2.5.1 only; nothing in WorldScore imports it.
+  [ "$torch" != 2.5.1 ] || pip_install xformers==0.0.28.post3 --index-url $index
   pip_install torch-scatter -f https://data.pyg.org/whl/torch-$torch+$cu.html
 fi
 pip_install pip setuptools wheel packaging ninja open3d tensorboard scipy opencv-python tqdm \
@@ -116,10 +126,8 @@ open("setup.py", "w").write(src)
 EOF
   grep -o "compute_[0-9]*" setup.py | sort -u | tr '\n' ' '
   echo
-  # torch 2.6 dropped the Tensor.type() overload of the AT_DISPATCH macros; pass
-  # scalar_type(), which every torch 2.x accepts. Idempotent: the result no longer matches.
-  sed -i -E 's/\b([A-Za-z0-9_]+)\.type\(\), "/\1.scalar_type(), "/g' \
-    src/*.cu thirdparty/lietorch/lietorch/src/*.cpp thirdparty/lietorch/lietorch/src/*.cu
+  patch_type_dispatch src/*.cu thirdparty/lietorch/lietorch/src/*.cpp \
+    thirdparty/lietorch/lietorch/src/*.cu
   "$P" setup.py install >"$WS_VENV/droid_build.log" 2>&1 || { tail -40 "$WS_VENV/droid_build.log"; die "DROID-SLAM build failed"; }
 fi
 
@@ -127,6 +135,7 @@ step "Grounded-SAM, SAM2, VFIMamba"
 if ! "$P" -c "import torch, segment_anything, groundingdino._C, sam2, causal_conv1d, mamba_ssm" 2>/dev/null; then
   cd "$WS_ROOT/thirdparty/Grounded-Segment-Anything"
   pip_install -e segment_anything
+  patch_type_dispatch GroundingDINO/groundingdino/models/GroundingDINO/csrc/MsDeformAttn/*.cu
   # --reinstall-package: an earlier install may lack _C, and uv would call it satisfied.
   pip_install --no-build-isolation --reinstall-package groundingdino -e GroundingDINO
   cd "$WS_ROOT/thirdparty/sam2"
