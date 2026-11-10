@@ -2,7 +2,7 @@
 
 接手的 agent 先读这份，再读 `decisions.md`。这里只记"现在做到哪、下一步是什么"；已定的模型与实验决定在 `decisions.md`。每次状态变化后更新本文件并提交。
 
-最后更新：2026-11-09 11:20 CST
+最后更新：2026-11-09 21:45 CST
 
 ## 角色与规矩
 
@@ -36,8 +36,8 @@
 | 开发用评测：原版 minWM，8 样例（试跑），K 选项 B | 完成。输出 `$W/outputs/WaveFront/2026-11-04-ws-minwm-k601/`。WorldScore-Static 68.19；VBench 四维均值 subject 0.978、background 0.956、motion 0.994、imaging 0.760（每条在各自 `vbench.json`，`summary.md` 不含 VBench） |
 | DeltaAI 额度 | 已同步（2026-11-07 16:00 查）：`accounts` 存入 1042、余 1000；RawShares 1042，账户 LevelFS 回到 0.53 |
 | 开发用评测：① 40 样例，K 选项 B | **完成**（Delta 任务 23648178，11-08 03:59 开始，10:49 出 summary，40/40 打分无失败）。输出 `$W/outputs/WaveFront/2026-11-07-ws-b1-k601/` |
-| 开发用评测：② 40 样例 | **排队中**，Delta 任务 23673998（gpuA40x4，1 卡，10 h），输出 `$W/outputs/WaveFront/2026-11-08-ws-b2-k601/`，checkpoint 为 ② 的 `model_3000.safetensors` |
-| 开发用评测：原版 minWM 扩到 40 样例 | **排队中**（11-08 12:50 仍无 slurm 输出），Delta 任务 23648597（同一 run `2026-11-04-ws-minwm-k601`，接着已有的 8 个生成剩下 32 个；已核对 8 个都在 `run_small.sh` 的 40 个里）。预计约 6 h |
+| 开发用评测：② 40 样例 | **排队中**，Delta 任务 23673998（gpuA40x4，1 卡，10 h），11-09 21:30 仍无开始估计，priority 821。输出 `$W/outputs/WaveFront/2026-11-08-ws-b2-k601/`，checkpoint 为 ② 的 `model_3000.safetensors` |
+| 开发用评测：原版 minWM 40 样例 | **完成**（Delta 任务 23648597，11-09 12:29–18:50）。WorldScore-Static 64.50（8 样例试跑时 68.19）。输出 `$W/outputs/WaveFront/2026-11-04-ws-minwm-k601/` |
 
 ## DeltaAI 评测环境（WorldScore 部分已装好，未上 GPU 验证）
 
@@ -46,6 +46,7 @@
 - 布局：评测代码 `$W/WaveFront-eval-gh`（`WaveFront-eval` 的 git worktree，detached 在 origin/feature/model），WorldScore `$W/WorldScore-gh`（指标权重软链到 `$W/WorldScore` 的），venv `/work/nvme/bjki/wchen38/venvs/worldscore-gh`。脚本 `$W/logs/setup_worldscore_gh.sh`，日志同名 .log。
 - 2026-11-09：`causal_conv1d` / `mamba_ssm` 的 PyPI 安装在 aarch64 上装进 x86 `.so`（setup.py 下载写死 linux_x86_64 的预编译轮子；causal-conv1d sdist 缺 csrc/）。改为从 GitHub tag 源码编（`$W/logs/fix_mamba_gh2.sh`，源码在 `$W/src-gh`），triton 用 3.5.1（PyPI 首个 aarch64 轮子；与 torch 2.6 非官方配套）。全部指标模块 import 通过，权重已预取。同样改法写进 `install_worldscore.sh`，**待用户批准提交**。登录节点无 GPU，指标能否真跑要等 GPU 任务。
 - 用户 2026-11-09 决定：Delta 上两个评测不挪（DeltaAI 新 1 卡任务估计 11-19 才开始，fairshare 0.013），也不改 preempt 分区。
+- DeltaAI 账户上还有 swift-odeinit（另一个项目，共用 `bjki-dtai-gh` 的 fairshare）。11-09 经用户批准：取消 16 个 p00 冒烟任务，改在登录节点上用 CPU 跑（`$W/logs/p00_local_cpu.sh`）；修好 `cf-smoke.sbatch`（`torchrun` 用容器 python，缺 omegaconf → 改 `python -m torch.distributed.run`），提交到 `ghx4-interactive`（任务 3566977，1.5 h）。新的 `ghx4` 任务 11-09 估计要等到 11-19；短任务用 `ghx4-interactive`（2 SU/卡时，限 2 h）排队短得多。
 - VBench 还没做：它依赖的 decord 在 aarch64 上没有轮子也没有 sdist，要从源码编（需 FFmpeg 开发库，DeltaAI 上有没有未查）。
 
 ## ② 排队慢的原因
@@ -54,7 +55,7 @@ DeltaAI 用 Fair Tree。我们账户份额只占全机 0.0021%，① 用了约 4
 
 ## 下一步
 
-1. **两个评测跑完后**：用 `report.py` 出 ① 对原版 minWM 的配对 HTML 报告给用户看（用户 2026-11-07 已要求）；② 训完评测后再加进来。
+1. **① 对原版 minWM 的配对报告**：11-09 在 Delta 登录节点生成中（`$W/logs/report_minwm_b1.sh`，输出 `$W/outputs/WaveFront/reports/2026-11-09-minwm-vs-b1/`）。② 评测跑完后再加进来。
 2. **② 开跑后**：查 step 0 的 `val/loss_rgb` 是否等于 ① 的 0.2009（同噪声），再看 250/500 步的 disp_err、每步时间、显存。日志在 `$W/outputs/WaveFront/b2-joint-depth/slurm-<id>.out`。注意 ② 用 `$W/WaveFront-data`（`1d3513a`），比提交时的 `ac6ce4b` 多了评测脚本和 disparity 构建修复，训练代码没变。
 3. **② 训完**：按 checkpoint 流程导出、上传、核对、清理（删除前要用户批准）。
 4. **开发用评测（每个任务要批准）**：原版 minWM 的同一 run 扩到 40 样例；① 用 K 选项 B 跑 40 样例（`inference.checkpoint` 指向 `model_3000.safetensors`）；之后 ②。三者齐了跑 `report.py` 出配对 HTML 报告给用户看。
