@@ -46,7 +46,7 @@
 - 布局：评测代码 `$W/WaveFront-eval-gh`（`WaveFront-eval` 的 git worktree，detached 在 origin/feature/model），WorldScore `$W/WorldScore-gh`（指标权重软链到 `$W/WorldScore` 的），venv `/work/nvme/bjki/wchen38/venvs/worldscore-gh`。脚本 `$W/logs/setup_worldscore_gh.sh`，日志同名 .log。
 - 2026-11-09：`causal_conv1d` / `mamba_ssm` 的 PyPI 安装在 aarch64 上装进 x86 `.so`（setup.py 下载写死 linux_x86_64 的预编译轮子；causal-conv1d sdist 缺 csrc/）。改为从 GitHub tag 源码编（`$W/logs/fix_mamba_gh2.sh`，源码在 `$W/src-gh`），triton 用 3.5.1（PyPI 首个 aarch64 轮子；与 torch 2.6 非官方配套）。全部指标模块 import 通过，权重已预取。同样改法写进 `install_worldscore.sh`，**待用户批准提交**。登录节点无 GPU，指标能否真跑要等 GPU 任务。
 - 用户 2026-11-09 决定：Delta 上两个评测不挪（DeltaAI 新 1 卡任务估计 11-19 才开始，fairshare 0.013），也不改 preempt 分区。
-- DeltaAI 账户上还有 swift-odeinit（另一个项目，共用 `bjki-dtai-gh` 的 fairshare）。11-09 经用户批准：取消 16 个 p00 冒烟任务，改在登录节点上用 CPU 跑（`$W/logs/p00_local_cpu.sh`）；修好 `cf-smoke.sbatch`（`torchrun` 用容器 python，缺 omegaconf → 改 `python -m torch.distributed.run`），提交到 `ghx4-interactive`（任务 3566977，1.5 h）。新的 `ghx4` 任务 11-09 估计要等到 11-19；短任务用 `ghx4-interactive`（2 SU/卡时，限 2 h）排队短得多。
+- DeltaAI 账户上还有 swift-odeinit（另一个项目，共用 `bjki-dtai-gh` 的 fairshare）。11-09 经用户批准：取消 16 个 p00 冒烟任务，改在登录节点上用 CPU 跑（`$W/logs/p00_local_cpu.sh`）；修好 `cf-smoke.sbatch`（`torchrun` 用容器 python，缺 omegaconf → 改 `python -m torch.distributed.run`），提交到 `ghx4-interactive`（任务 3566977，1.5 h）。同日用户要求取消全部 swift 任务：3566977 未开始即取消；本地 p00 在 data、evalset、kd[0]、kd[1] 完成后被停（launcher 幂等，可续跑）。DeltaAI 上现在没有我们的任务。新的 `ghx4` 任务 11-09 估计要等到 11-19；短任务用 `ghx4-interactive`（2 SU/卡时，限 2 h）排队短得多。
 - VBench 还没做：它依赖的 decord 在 aarch64 上没有轮子也没有 sdist，要从源码编（需 FFmpeg 开发库，DeltaAI 上有没有未查）。
 
 ## ② 排队慢的原因
