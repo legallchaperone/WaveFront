@@ -21,7 +21,7 @@
   - 计费按 TRES 取最大：每张卡 ≤ 72 CPU、≤ 约 110 GB 内存。
 - Delta（`ssh delta`，A40），账户 `bjki-delta-gpu`，评测用 `gpuA40x4`。
 - 数据：`$W/data/lmdb/spatialvid/{train,val,train_disparity,val_disparity}`。
-- 代码副本：`$W/WaveFront`（① 用）、`$W/WaveFront-data`（② 和数据脚本用，现为 `1d3513a`）、`$W/WaveFront-eval`（评测用，现为 `c396005`）。均跟 `feature/model`。
+- 代码副本：`$W/WaveFront`（① 用）、`$W/WaveFront-data`（② 和数据脚本用，现为 `ee58432`）、`$W/WaveFront-eval`（评测用，现为 `c396005`）。均跟 `feature/model`。
 - 任务脚本：`$W/logs/*.sbatch`、`*.sh`；本地副本 `/tmp/wfmon/gh/`。
 - checkpoint：HF 仓库 `cwx-umich/wavefront-checkpoints`。流程：导出全部 DCP → 上传 HF → 核对大小 → 只留最后一个 DCP。
 
@@ -34,6 +34,8 @@
 | 数据：train disparity | 完成（2026-11-05）：写入 12,017，跳过 111（全部 inverted_depth），失败 0；std(2d−1)=0.6445，a 仍为 1.5 |
 | ① `b1-continue` | 训完（3000 步，val/loss_rgb 0.2009 → 0.1880，W&B `cwxlab/wavefront/0ockapbw`）。`model_{1000,2000,3000}.safetensors` 已上传 HF；DCP 只留 `checkpoint_3000`。导出文件在 `$W/outputs/WaveFront/b1-continue/ckpts/exported/` |
 | ② `b2-joint-depth`，DeltaAI 任务 3529078 | **训完**（11-08 10:51–19:28，8 h 37 min，约 34.5 SU，exit 0）。val/loss_rgb 0.2009 → 0.2322（250 步）→ 0.2015（3000 步），① 同步数为 0.1880；分噪声水平 @0.1/0.5/0.9 为 0.513/0.119/0.084（① 0.482/0.110/0.079）。val/disp_err 0.1919 → 0.1328。三个都已导出到 `ckpts/exported/`。HF 有 `model_{1000,2000}`（大小已核对）；HF 私有存储已满，`model_3000` 存在用户 Google Drive `gdrive:wavefront-checkpoints/b2-joint-depth/`（rclone，md5 已核对，见 memory `gdrive-rclone`）。DCP 只留 `checkpoint_3000`（1000/2000 经用户批准于 11-08 删除） |
+| ② 的 disparity 分支没训好（2026-11-10 发现） | `val/loss_disp` 停在 1.0（噪声方差），各噪声水平相同；`val/disp_err` = 0.266 × 噪声水平。`model_3000` 里 `disp_embed`、`head.disp_head` 都是秩 1（token 均值进、token 常数出），rms 6.6e-4 / 1.2e-3，RGB 对应层是 3.3e-2 / 2.1e-2。只学到粗深度，噪声没去掉。原因：零初始化 + lr 2e-6，3000 步最多走 6e-3。② 的评测结果要标"深度分支没训好" |
+| ② 短跑 `b2-lr-probe`，DeltaAI 任务 3574932 | **排队中**（`ghx4-interactive`，1 卡，1.5 h，约 2 SU；11-10 提交）。`disp_embed.`、`head.disp_head.` 用 50 倍 lr（1e-4），250 步，每 50 步验证。配置 `b2_joint_depth_lr_probe.py`，脚本 `$W/logs/b2-lr-probe.sbatch`，输出 `$W/outputs/WaveFront/b2-lr-probe/`。达标线：`val/loss_disp` 明显低于 1.0，且随噪声水平变化。不达标就试 `disp_embed` 非零初始化 |
 | 开发用评测：原版 minWM，8 样例（试跑），K 选项 B | 完成。输出 `$W/outputs/WaveFront/2026-11-04-ws-minwm-k601/`。WorldScore-Static 68.19；VBench 四维均值 subject 0.978、background 0.956、motion 0.994、imaging 0.760（每条在各自 `vbench.json`，`summary.md` 不含 VBench） |
 | DeltaAI 额度 | 2026-11-10 查：存入 1042、余 965（② 用约 35）。DeltaAI 上没有我们的任务 |
 | 开发用评测：① 40 样例，K 选项 B | **完成**（Delta 任务 23648178，11-08 03:59 开始，10:49 出 summary，40/40 打分无失败）。输出 `$W/outputs/WaveFront/2026-11-07-ws-b1-k601/` |
@@ -60,6 +62,15 @@ DeltaAI 用 Fair Tree。我们账户份额只占全机 0.0021%，① 用了约 4
 2. **② 开跑后**：查 step 0 的 `val/loss_rgb` 是否等于 ① 的 0.2009（同噪声），再看 250/500 步的 disp_err、每步时间、显存。日志在 `$W/outputs/WaveFront/b2-joint-depth/slurm-<id>.out`。注意 ② 用 `$W/WaveFront-data`（`1d3513a`），比提交时的 `ac6ce4b` 多了评测脚本和 disparity 构建修复，训练代码没变。
 3. **② 训完**：按 checkpoint 流程导出、上传、核对、清理（删除前要用户批准）。
 4. **开发用评测（每个任务要批准）**：原版 minWM 的同一 run 扩到 40 样例；① 用 K 选项 B 跑 40 样例（`inference.checkpoint` 指向 `model_3000.safetensors`）；之后 ②。三者齐了跑 `report.py` 出配对 HTML 报告给用户看。
+
+## 开训前检查（2026-11-10 用户确认）
+
+往预训练模型里加新层或新 loss 的 run，提交前逐条过：
+
+1. 每个新指标写下三个参考值（没训、走捷径、学会）和达标线。
+2. 新层算 lr × 步数，和预训练对应层的权重量级比；差一个量级就单独设 lr 或换初始化。
+3. 正式跑前做一次"能不能学会"的短跑：新分支的 loss 要低于捷径值。
+4. 正式跑在 250 或 500 步设关卡，不达标就停。
 
 ## 等用户决定
 
