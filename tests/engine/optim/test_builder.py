@@ -1,5 +1,6 @@
 """Tests for builder.py."""
 
+import pytest
 import torch
 import torch.nn as nn
 
@@ -130,3 +131,16 @@ class TestMuon:
         assert "moment2" in opt.state[module.bias]
         assert "momentum_buffer" not in opt.state[module.bias]
         assert "momentum_buffer" in opt.state[module.weight]
+
+    def test_lr_scales_split_groups_by_prefix(self):
+        module = nn.Sequential(nn.Linear(2, 3), nn.Linear(3, 1))
+        opt = build_optimizer(module, {"lr": 1e-3, "weight_decay": 0.01, "lr_scales": {"1.": 50.0}})
+        rest, scaled = opt.param_groups
+        assert rest["lr"] == 1e-3 and scaled["lr"] == pytest.approx(5e-2)
+        assert scaled["weight_decay"] == 0.01
+        assert [id(p) for p in scaled["params"]] == [id(p) for p in module[1].parameters()]
+        assert [id(p) for p in rest["params"]] == [id(p) for p in module[0].parameters()]
+
+    def test_lr_scales_unmatched_prefix_raises(self):
+        with pytest.raises(ValueError, match="match no trainable parameter"):
+            build_optimizer(nn.Linear(4, 3), {"lr": 1e-3, "lr_scales": {"missing.": 2.0}})
